@@ -41,13 +41,17 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  if (!SHELL_ASSETS.includes(url.pathname)) return;
+  const isNextStatic = url.pathname.startsWith("/_next/static/");
+  const isShellAsset = SHELL_ASSETS.includes(url.pathname);
+
+  if (!isNextStatic && !isShellAsset) return;
 
   event.respondWith(
     caches.open(SHELL_CACHE).then((cache) =>
       cache.match(req).then((cached) => {
         if (cached) return cached;
         return fetch(req).then((res) => {
+          if (!res || !res.ok) return res;
           cache.put(req, res.clone());
           return res;
         });

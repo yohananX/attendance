@@ -1,3 +1,4 @@
+const CACHE_PREFIX = "gh-attendance-";
 const CACHE_VERSION = "gh-attendance-shell-v1";
 const SHELL_CACHE = CACHE_VERSION;
 const SHELL_ASSETS = [
@@ -17,7 +18,11 @@ self.addEventListener("install", (event) => {
 self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches.keys().then((keys) =>
-      Promise.all(keys.filter((k) => k !== SHELL_CACHE).map((k) => caches.delete(k))),
+      Promise.all(
+        keys
+          .filter((k) => k.startsWith(CACHE_PREFIX) && k !== SHELL_CACHE)
+          .map((k) => caches.delete(k)),
+      ),
     ).then(() => self.clients.claim()),
   );
 });
@@ -31,25 +36,22 @@ self.addEventListener("fetch", (event) => {
 
   if (req.mode === "navigate") {
     event.respondWith(
-      fetch(req)
-        .then((res) => {
-          const copy = res.clone();
-          caches.open(SHELL_CACHE).then((c) => c.put(req, copy));
-          return res;
-        })
-        .catch(() => caches.match(req).then((m) => m || caches.match("/offline"))),
+      fetch(req).catch(() => caches.open(SHELL_CACHE).then((c) => c.match("/").then((m) => m || c.match("/offline")))),
     );
     return;
   }
 
+  if (!SHELL_ASSETS.includes(url.pathname)) return;
+
   event.respondWith(
-    caches.match(req).then((cached) => {
-      if (cached) return cached;
-      return fetch(req).then((res) => {
-        const copy = res.clone();
-        caches.open(SHELL_CACHE).then((c) => c.put(req, copy));
-        return res;
-      });
-    }),
+    caches.open(SHELL_CACHE).then((cache) =>
+      cache.match(req).then((cached) => {
+        if (cached) return cached;
+        return fetch(req).then((res) => {
+          cache.put(req, res.clone());
+          return res;
+        });
+      }),
+    ),
   );
 });

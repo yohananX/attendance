@@ -4,16 +4,20 @@ out/
 dist/
 build/
 
+# Environment files — only the placeholder .env.example is committed
 .env
 .env.local
 .env.*.local
+.env*
 !.env.example
 
 *.tsbuildinfo
 *.pem
-.vercel-auth
 
 .vercel/
+.vercel
+.vercel-auth
+
 coverage/
 
 .DS_Store

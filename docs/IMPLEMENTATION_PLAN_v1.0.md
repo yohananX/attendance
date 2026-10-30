@@ -9,7 +9,7 @@
 | **Team** | **One developer**, part-time stakeholder access for device testing |
 | **Target** | **Controlled pilot: Saturday 7 November 2026.** Paper-backed session: Saturday 31 October 2026. Production sign-off: 14–21 November 2026. **No production release is promised by 31 October.** |
 | **Inputs** | `PRD_v1.2.md` (product source of truth), `SYSTEM_ARCHITECTURE_v1.0.md` (AD-1…AD-10, protocol, data model), `PRD_VERIFICATION_REPORT.md` §8 |
-| **Rules** | No application code, SQL or migrations are written in this plan — it sequences them. No stakeholder decision (Q13–Q16, Q5) is assumed answered; safe defaults from the architecture are used and flagged. |
+| **Rules** | No application code, SQL or migrations are written in this plan — it sequences them. No stakeholder decision (Q13–Q16, Q5) is assumed answered; safe defaults from the architecture are used and flagged. The central record for Q5 and Q13–Q16 (proposed defaults and sign-off status) is `STAKEHOLDER_DECISION_REGISTER_v1.0.md`; all five remain **pending stakeholder approval**. |
 
 ---
 

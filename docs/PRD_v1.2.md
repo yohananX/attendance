@@ -706,6 +706,8 @@ No other integrations. The Google Sheet/Form fallback (A10) is referenced but it
 
 ## 27. Open Questions and Pending Decisions
 
+**Central record:** proposed defaults and the sign-off record for **Q5** and **Q13–Q16** are maintained in `STAKEHOLDER_DECISION_REGISTER_v1.0.md`. All five remain **pending stakeholder approval**; the recommendations below are proposed safe defaults, not approved decisions.
+
 ### 27.1 Stakeholder decisions required (new from technical audit)
 
 | # | Question | Recommendation |

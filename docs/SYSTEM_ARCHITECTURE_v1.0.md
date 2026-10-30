@@ -546,7 +546,7 @@ Close day runs only when: online **and** every outbox entry acknowledged **and**
 
 ## 8. Architecture decisions (ADR-1 … ADR-10)
 
-Starting points: `PRD_VERIFICATION_REPORT.md` §5. **Q13–Q16 are product/stakeholder decisions and are not converted into technical decisions** — where a build default is needed, the safest reversible default is stated and marked as gated.
+Starting points: `PRD_VERIFICATION_REPORT.md` §5. **Q13–Q16 are product/stakeholder decisions and are not converted into technical decisions** — where a build default is needed, the safest reversible default is stated and marked as gated. The central record for Q5 and Q13–Q16 (proposed defaults and sign-off status) is `STAKEHOLDER_DECISION_REGISTER_v1.0.md`; all five remain **pending stakeholder approval**.
 
 | ID | Decision | Selected approach | Reason | Alternatives rejected | Consequences | Stakeholder approval still required? |
 |---|---|---|---|---|---|---|

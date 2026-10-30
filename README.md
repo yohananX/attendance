@@ -99,6 +99,12 @@ node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 ## Current state
 
 - ✅ Next.js App Router + TypeScript skeleton deployed to Vercel (T1.1)
-- ⬜ Supabase wiring + lockdown (T1.2)
+- 🔲 Supabase wiring + lockdown (T1.2) — code complete: server-only Supabase
+  client (`src/lib/supabase/server.ts`), `/api/health` connectivity route, and
+  initial schema migration (`supabase/migrations/20261031000000_initial_schema.sql`)
+  with RLS enabled + no policies on all tables and event immutability guardrails.
+  Remaining: create the Supabase project, add `SUPABASE_URL` and
+  `SUPABASE_SERVICE_ROLE_KEY` to `.env.local` and Vercel, then apply the
+  migration to the empty database.
 - ⬜ PWA skeleton (T1.3)
 - ⬜ Login, attendance capture, sync, messaging, review, day close (T2–T8)

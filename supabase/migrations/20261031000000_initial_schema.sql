@@ -32,6 +32,40 @@ CREATE TABLE IF NOT EXISTS sessions (
   updated_at         timestamptz NOT NULL DEFAULT now()
 );
 
+-- Keep sessions.updated_at current on updates
+CREATE OR REPLACE FUNCTION set_sessions_updated_at()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  NEW.updated_at = now();
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS sessions_set_updated_at ON sessions;
+CREATE TRIGGER sessions_set_updated_at
+  BEFORE UPDATE ON sessions
+  FOR EACH ROW
+  EXECUTE FUNCTION set_sessions_updated_at();
+
+-- Sessions mutability guardrail (AC-30.4): direct updates are blocked by default.
+-- Sanctioned paths must use dedicated security-definer functions.
+CREATE OR REPLACE FUNCTION sessions_mutability_guard()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'sessions is not directly updatable: use sanctioned projection/correction/marker paths';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS sessions_no_direct_update ON sessions;
+CREATE TRIGGER sessions_no_direct_update
+  BEFORE UPDATE ON sessions
+  FOR EACH ROW
+  EXECUTE FUNCTION sessions_mutability_guard();
+
 CREATE INDEX IF NOT EXISTS idx_sessions_day_key ON sessions(day_key);
 CREATE INDEX IF NOT EXISTS idx_sessions_outstanding_messages
   ON sessions(day_key)
@@ -48,7 +82,7 @@ CREATE TABLE IF NOT EXISTS events (
   parent_phone       text NULL CHECK (parent_phone ~ '^\+[0-9]{7,15}$'),
   device_event_at    timestamptz NOT NULL,
   server_received_at timestamptz NOT NULL DEFAULT now(),
-  queued_duration    interval NOT NULL,
+  queued_duration    interval NOT NULL CHECK (queued_duration >= interval '0'),
   captured_offline   boolean NOT NULL DEFAULT false,
   device_id          uuid NOT NULL,
   device_seq         bigint NOT NULL,
@@ -61,14 +95,7 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_events_device_day_seq
   ON events(device_id, day_key, device_seq);
--- PD-D2: one accepted sign-in binds a session
-CREATE UNIQUE INDEX IF NOT EXISTS idx_events_one_sign_in_per_session
-  ON events(session_ref)
-  WHERE event_type = 'sign_in' AND conflict_marker = 'none';
--- PD-D2: exactly one accepted sign-out per session (BR-06)
-CREATE UNIQUE INDEX IF NOT EXISTS idx_events_one_sign_out_per_session
-  ON events(session_ref)
-  WHERE event_type = 'sign_out' AND conflict_marker = 'none';
+-- PD-D2 indexes deferred pending owner approval (do not create yet)
 
 CREATE INDEX IF NOT EXISTS idx_events_day_key ON events(day_key);
 CREATE INDEX IF NOT EXISTS idx_events_session_ref ON events(session_ref);
@@ -83,7 +110,7 @@ CREATE TABLE IF NOT EXISTS conflicts (
   session_ref                 uuid NOT NULL REFERENCES sessions(session_ref),
   conflict_type               text NOT NULL CHECK (conflict_type IN ('time_conflict','correction_conflict')),
   winning_event_id            uuid NULL REFERENCES events(event_id),
-  losing_event_ids            uuid[] NOT NULL DEFAULT '{}',
+  losing_event_ids            uuid[] NOT NULL DEFAULT '{}' CHECK (array_length(losing_event_ids, 1) IS NOT NULL AND array_length(losing_event_ids, 1) > 0),
   winner_received_at          timestamptz NULL,
   resolution                  text NULL CHECK (resolution IN ('first_recorded_time','later_event_time')),
   resolution_correction_id    uuid NULL,
@@ -100,7 +127,7 @@ CREATE INDEX IF NOT EXISTS idx_conflicts_resolution_correction ON conflicts(reso
 -- ============================================================
 CREATE TABLE IF NOT EXISTS corrections (
   correction_id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  correction_event_id    uuid NOT NULL UNIQUE REFERENCES events(event_id),
+  correction_event_id    uuid NOT NULL REFERENCES events(event_id),
   session_ref            uuid NOT NULL REFERENCES sessions(session_ref),
   field                  text NOT NULL CHECK (field IN ('signed_in_at','signed_out_at')),
   original_value         text NOT NULL,
@@ -129,7 +156,9 @@ CREATE TABLE IF NOT EXISTS login_attempts (
   id            bigserial PRIMARY KEY,
   device_id     uuid NOT NULL,
   attempted_at  timestamptz NOT NULL DEFAULT now(),
-  outcome       text NOT NULL CHECK (outcome IN ('success','failure'))
+  outcome       text NOT NULL CHECK (outcome IN ('success','failure')),
+  ip            text NULL,
+  user_agent    text NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_login_attempts_device_time
@@ -153,7 +182,6 @@ ALTER TABLE login_attempts ENABLE ROW LEVEL SECURITY;
 -- Guardrails on events: append-only — UPDATE and DELETE are prohibited at the
 -- data layer, with no exception for any role or path. Corrections never touch
 -- the log; stored events remain byte-identical (BR-05/07, AC-11.4).
--- ============================================================
 CREATE OR REPLACE FUNCTION events_immutable_guard()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -175,6 +203,52 @@ CREATE TRIGGER events_no_delete
   BEFORE DELETE ON events
   FOR EACH ROW
   EXECUTE FUNCTION events_immutable_guard();
+
+-- Guardrails on corrections: append-only (audit table)
+CREATE OR REPLACE FUNCTION corrections_immutable_guard()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'corrections is append-only: UPDATE and DELETE are prohibited';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS corrections_no_update ON corrections;
+DROP TRIGGER IF EXISTS corrections_no_delete ON corrections;
+
+CREATE TRIGGER corrections_no_update
+  BEFORE UPDATE ON corrections
+  FOR EACH ROW
+  EXECUTE FUNCTION corrections_immutable_guard();
+
+CREATE TRIGGER corrections_no_delete
+  BEFORE DELETE ON corrections
+  FOR EACH ROW
+  EXECUTE FUNCTION corrections_immutable_guard();
+
+-- Guardrails on conflicts: append-only (audit table)
+CREATE OR REPLACE FUNCTION conflicts_immutable_guard()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'conflicts is append-only: UPDATE and DELETE are prohibited';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS conflicts_no_update ON conflicts;
+DROP TRIGGER IF EXISTS conflicts_no_delete ON conflicts;
+
+CREATE TRIGGER conflicts_no_update
+  BEFORE UPDATE ON conflicts
+  FOR EACH ROW
+  EXECUTE FUNCTION conflicts_immutable_guard();
+
+CREATE TRIGGER conflicts_no_delete
+  BEFORE DELETE ON conflicts
+  FOR EACH ROW
+  EXECUTE FUNCTION conflicts_immutable_guard();
 
 -- Retention note: no in-app delete of attendance data exists anywhere
 -- (BR-07/18, C8, D3). End-of-term purge is an owner-level manual operation

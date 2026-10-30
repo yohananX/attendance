@@ -1,27 +1,26 @@
 /**
- * Health endpoint: proves service-role connectivity to Supabase.
+ * Health endpoint: proves service-role connectivity to Supabase (protected).
  *
- * Used by T1.2's acceptance test — a server route returns ok using the
- * service-role key, demonstrating the server-only access path works
- * (docs/SYSTEM_ARCHITECTURE_v1.0.md §4.7; S2/S3; AC-G1).
- *
- * This endpoint:
- * - requires no session cookie (it is a connectivity probe, not an attendance
- *   endpoint),
- * - never returns attendance data or credential values,
- * - reports whether the schema has been applied (`dbReady`) so callers can
- *   distinguish "connected, empty database" from "schema not yet applied".
- *
- * Rendered at request time so the result reflects live configuration.
+ * This endpoint is protected and must not be publicly accessible.
+ * It requires an operator secret header to mitigate unauthenticated probing.
  */
+
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 
 import { getServerSupabaseClient } from "@/lib/supabase/server";
 
-export async function GET() {
+const HEALTH_SECRET_HEADER = "x-health-secret";
+
+export async function GET(req: Request) {
   const serverTime = new Date().toISOString();
+  const secret = process.env.HEALTH_CHECK_SECRET?.trim();
+  const provided = req.headers.get(HEALTH_SECRET_HEADER)?.trim();
+
+  if (!secret || !provided || provided !== secret) {
+    return NextResponse.json({ ok: false, serverTime, error: "unauthorized" }, { status: 401 });
+  }
 
   let supabase;
   try {
@@ -33,24 +32,25 @@ export async function GET() {
     );
   }
 
-  // A simple, no-row-returning probe against the events table proves the
-  // service-role key can reach the database. `head: true` returns no data.
   let dbReady = false;
   try {
-    const { error } = await supabase.from("events").select("event_id", {
-      head: true,
-      count: "exact",
-    });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    const { error } = await supabase
+      .from("events")
+      .select("event_id", { head: true, count: "exact" })
+      .abortSignal(controller.signal as any);
+    clearTimeout(timeout);
+    // Do not treat empty results with no error as proof alone in a naive way,
+    // but this is a basic probe; service-role is required for RLS-enabled tables with no policies.
     dbReady = error === null;
   } catch {
-    // Network or client errors leave dbReady false; connectivity itself was
-    // attempted and is reported ok if we got a Supabase response.
+    dbReady = false;
   }
 
   return NextResponse.json({
     ok: true,
     serverTime,
     dbReady,
-    schema: dbReady ? "applied" : "not_applied",
   });
 }

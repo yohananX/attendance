@@ -1,0 +1,417 @@
+School Attendance Sign-In: PRD and Build Plan
+30 Oct 2026 · @Someone
+Overview
+This is a small web app that records when each child arrives at and leaves Saturday's extra lesson, so the school can send every parent timestamped proof. Staff type a name and a parent number, tap Sign in, later tap Sign out, then send the parent a WhatsApp message.
+The app is a success if every child present has an arrival and a departure time that staff cannot type or alter, and every parent receives that proof the same day.
+Item
+Detail
+Needed by
+Saturday, 31 October 2026
+Stack
+Next.js on Vercel, Supabase (Postgres)
+Used by
+School staff on phones
+Parent message
+WhatsApp, opened from the staff phone with a pre-written text (no API, no cost)
+Time zone
+Africa/Lagos (UTC+1)
+Goals, non-goals and success criteria
+The app must produce believable proof of arrival and departure with the least typing possible at the gate.
+Goals
+• Record a child's arrival in under 15 seconds.
+• Record departure with one tap from a list of children currently in school.
+• Set every time on the server, so staff cannot type or back-date it.
+• Give staff a ready-to-send WhatsApp message for each parent.
+Non-goals for Saturday
+• Parent logins or a parent portal.
+• QR cards or barcode scanning.
+• Automatic SMS or WhatsApp sending.
+• Fees, grades, timetables or any wider school management.
+Success criteria
+• Every child present on Saturday has one row with a sign-in time, and a sign-out time once they leave.
+• No row can have its sign-in time changed after it is saved.
+• Every parent receives a message with both times before the day ends.
+• Two staff phones can use the app at once without losing or duplicating records.
+Users and roles
+Only school staff use the app. Parents never log in; they only receive a message.
+Role
+Who
+What they do
+Gate staff
+Teacher or volunteer at the entrance
+Signs children in, signs them out, sends the parent message
+Lead teacher
+Person in charge of the lesson
+Does everything gate staff do, plus corrects mistakes and checks the day's list
+Parent
+Guardian of a child
+Receives a WhatsApp message with arrival and departure times
+All staff share one PIN. Each person enters their own first name when they log in, and that name is stored on every record they create, so the school can see who recorded what.
+User stories and acceptance criteria
+#
+Story
+Done when
+U1
+As gate staff, I log in with the PIN and my name so only staff can use the app.
+A wrong PIN shows an error. A right PIN opens the main screen with my name shown.
+U2
+As gate staff, I sign a child in by typing their name and parent number.
+The child appears in "In school" with the sign-in time set by the server.
+U3
+As gate staff, I see who is currently in school.
+The list shows name, sign-in time and a Sign out button, newest first.
+U4
+As gate staff, I sign a child out with one tap.
+The sign-out time is saved once and the child moves to "Signed out".
+U5
+As gate staff, I send the parent a message after sign-out.
+The Send message button opens WhatsApp with the parent's number and a pre-written text with both times.
+U6
+As lead teacher, I fix a typo in a name or phone number.
+Name and phone can be edited. Sign-in and sign-out times cannot.
+U7
+As lead teacher, I check the whole day.
+One list shows every child, both times, who recorded them, and whether the message was sent.
+U8
+As a parent, I get a clear message.
+The text names my child and gives the date, arrival time and departure time.
+Functional requirements
+Must items are needed for Saturday. Should items go in if time allows tonight. Could items wait.
+ID
+Requirement
+Priority
+F1
+Staff log in with a shared PIN and their first name. The PIN is checked on the server and the session lasts 12 hours.
+Must
+F2
+Sign-in form takes student name and parent phone. Both are required.
+Must
+F3
+Phone numbers are cleaned and saved with the country code. A number such as 0803 123 4567 is saved as +2348031234567.
+Must
+F4
+The sign-in time is set by the database, never by the browser.
+Must
+F5
+"In school" list shows every child with no sign-out time, with a Sign out button.
+Must
+F6
+Sign out sets the sign-out time once. A second tap on the same child changes nothing.
+Must
+F7
+After sign-out, a Send message button opens a WhatsApp link with the parent's number and the message text.
+Must
+F8
+The sign-in time cannot be edited by anyone, including through the database API.
+Must
+F9
+Warn when the same name and phone are already signed in and not yet signed out.
+Should
+F10
+Edit name and phone on a record. Every edit is logged with who and when.
+Should
+F11
+"Signed out today" list with a Send message button and a "Message sent" marker.
+Should
+F12
+Search the lists by name.
+Should
+F13
+Times display in Africa/Lagos, 12-hour format, with the date.
+Must
+F14
+Download the day's records as a CSV file.
+Could
+F15
+Sign out everyone still in school at a chosen closing time.
+Could
+The parent message follows this template, with the school name read from a setting:
+Hello, this is [School name]. [Student name] arrived at [8:47 AM] and left at [12:15 PM] on [Sat 31 Oct 2026]. Thank you.
+Screens and flows
+The app has two screens and one small edit window. It is designed for a phone held in one hand, with large buttons.
+Screen 1: Login
+• Fields: first name, PIN.
+• Button: Log in.
+Screen 2: Attendance (one page, three parts)
+1. Sign in form at the top: student name, parent phone, Sign in button. After saving, the form clears and the name is ready for the next child.
+2. In school list: each row shows name, sign-in time and a Sign out button.
+3. Signed out today list: each row shows name, both times, a Send message button, and a "Message sent" marker once used.
+A search box above the lists filters by name. A small counter shows how many children are in school now.
+Edit window: opens from a pencil icon on any row. It changes name and phone only and shows the times as read-only text.
+Daily flow
+1. Child arrives. Staff type name and parent phone, then tap Sign in.
+2. Child appears in "In school".
+3. Child is collected. Staff tap Sign out on that row.
+4. Row moves to "Signed out today".
+5. Staff tap Send message. WhatsApp opens with the text ready.
+6. Staff tap send in WhatsApp. The app marks the message as sent.
+Data model
+One main table holds the proof. A second table logs corrections. The database, not the app, protects the sign-in time, so even a bug or a stolen key cannot rewrite it.
+Column
+Type
+Notes
+id
+uuid
+Primary key, generated
+student_name
+text
+Required
+parent_phone
+text
+Required, saved as +234...
+signed_in_at
+timestamptz
+Default now(), locked after insert
+signed_out_at
+timestamptz
+Empty until sign-out, then locked
+signed_in_by
+text
+Staff first name from login
+signed_out_by
+text
+Staff first name from login
+message_sent_at
+timestamptz
+Set when the parent message is sent
+created_at
+timestamptz
+Default now()
+Run this in the Supabase SQL editor:
+create extension if not exists pgcrypto;
+
+create table attendance (
+  id uuid primary key default gen_random_uuid(),
+  student_name text not null,
+  parent_phone text not null,
+  signed_in_at timestamptz not null default now(),
+  signed_out_at timestamptz,
+  signed_in_by text not null,
+  signed_out_by text,
+  message_sent_at timestamptz,
+  created_at timestamptz not null default now()
+);
+
+create table attendance_edits (
+  id uuid primary key default gen_random_uuid(),
+  attendance_id uuid not null references attendance(id),
+  edited_by text not null,
+  old_name text,
+  new_name text,
+  old_phone text,
+  new_phone text,
+  edited_at timestamptz not null default now()
+);
+
+-- Lock the times: sign-in can never change, sign-out can be set once.
+create or replace function lock_attendance_times() returns trigger as $$
+begin
+  if new.signed_in_at is distinct from old.signed_in_at then
+    raise exception 'signed_in_at cannot be changed';
+  end if;
+  if old.signed_out_at is not null
+     and new.signed_out_at is distinct from old.signed_out_at then
+    raise exception 'signed_out_at is already set';
+  end if;
+  if new.signed_out_at is not null and old.signed_out_at is null then
+    new.signed_out_at := now();
+  end if;
+  return new;
+end;
+$$ language plpgsql;
+
+create trigger attendance_lock_times
+before update on attendance
+for each row execute function lock_attendance_times();
+
+-- No deletes through the app.
+create or replace function block_attendance_delete() returns trigger as $$
+begin
+  raise exception 'attendance rows cannot be deleted';
+end;
+$$ language plpgsql;
+
+create trigger attendance_no_delete
+before delete on attendance
+for each row execute function block_attendance_delete();
+
+-- Failed PIN attempts, used for the 5-minute wait.
+create table login_attempts (
+  id uuid primary key default gen_random_uuid(),
+  device text not null,
+  attempted_at timestamptz not null default now()
+);
+
+-- Turn on row level security with no public policies.
+alter table attendance enable row level security;
+alter table attendance_edits enable row level security;
+alter table login_attempts enable row level security;
+To sign a child out, the app sets signed_out_at to any value. The trigger replaces it with the database clock, so the time is always the server's. With row level security on and no policies, the public key in the browser can read or write nothing. Only the server, using the service role key, can reach the tables.
+Security and privacy
+The app holds children's names and parents' phone numbers, so access must be limited to staff and the database must not be reachable from the open internet.
+• PIN check on the server. The browser sends the PIN to a server route. The server compares it with a secret setting and, if it matches, sets a signed, HTTP-only cookie that lasts 12 hours.
+• No database keys in the browser. All reads and writes go through server code using the Supabase service role key. That key lives only in Vercel environment variables.
+• Row level security on, no policies. This blocks the public Supabase key from reading or writing anything.
+• Limit PIN guessing. After 5 wrong PINs from one device, wait 5 minutes before allowing another try.
+• Use a PIN of at least 6 digits and change it after Saturday. Share it by word of mouth, not in a group chat.
+• HTTPS only. Vercel provides this automatically.
+• Attribution. Staff first name is saved on each sign-in and sign-out. A shared PIN cannot prove who typed it, so this is a record of who said they did it.
+• Retention. Keep the records until the end of term, then export and delete them. Tell parents what is recorded and why when the message is first sent.
+Technical architecture
+The phone never talks to the database directly. Every request goes to the Vercel app, which alone holds the database key.
+The parent message leaves from the staff phone through WhatsApp, not from the server, so the app needs no messaging account.
+Choices
+• Framework: Next.js (App Router) with server actions for sign in, sign out and edits.
+• Database access: @supabase/supabase-js in server code only, using the service role key.
+• Login session: a signed, HTTP-only cookie holding the staff first name.
+• PIN limit: failed attempts are counted per device in a small login_attempts table.
+• Time display: formatted in Africa/Lagos with Intl.DateTimeFormat, so every phone shows the same time.
+• WhatsApp link: https://wa.me/<number without +>?text=<url-encoded message>.
+• Refresh: the lists reload every 15 seconds and after each action, so both staff phones stay in step.
+Build plan
+The build takes about 5 hours 20 minutes of focused work, so starting this afternoon leaves Friday evening as a buffer. Estimates are approximate. Cut Should and Could items first if time runs short.
+Phase
+Work
+Estimate
+Done when
+1. Setup
+Create Supabase project, GitHub repo, Next.js app, Vercel link
+30 min
+Blank app loads on a Vercel URL
+2. Database
+Run the SQL, then test the lock triggers by hand
+20 min
+Editing signed_in_at fails, sign-out sets once
+3. Login
+PIN route, signed cookie, rate limit, login screen
+40 min
+Wrong PIN refused, right PIN reaches the main screen
+4. Sign in
+Form, phone cleaning, insert, duplicate warning
+45 min
+A child appears in "In school" with a server time
+5. Sign out
+In-school list, sign-out action, moved row
+30 min
+Time saved once, row moves to the second list
+6. Message
+Time formatting in Lagos time, WhatsApp link, message-sent marker
+30 min
+WhatsApp opens with the right number and text
+7. Edit and search
+Edit window with log, name search
+30 min
+Edit saves, log row written, times stay read-only
+8. Polish
+Large buttons, phone layout, add-to-home-screen icon
+30 min
+Usable one-handed on a real phone
+9. Test
+Run the test checklist on two phones
+45 min
+Every item ticked
+10. Handover
+Print the runbook, set the final PIN, brief staff
+20 min
+Staff can run a full cycle unassisted
+Order of cuts if time is short: CSV download, then search, then the edit window, then the duplicate warning. Never cut the database locks, the PIN, or the Lagos time display.
+Deployment steps
+1. Supabase. Create a project. Pick the region closest to Lagos (a Europe region such as London or Frankfurt is usually nearest). Save the database password somewhere safe.
+2. Run the SQL from the Data model section in the SQL editor.
+3. Copy two values from Project Settings, then API: the project URL and the service_role key. Never paste the service role key into front-end code or a chat.
+4. GitHub. Push the Next.js project to a private repository.
+5. Vercel. Import the repository and add these environment variables:
+    ◦ SUPABASE_URL
+    ◦ SUPABASE_SERVICE_ROLE_KEY
+    ◦ STAFF_PIN (6 digits or more)
+    ◦ SESSION_SECRET (a long random string)
+    ◦ SCHOOL_NAME (used in the parent message)
+6. Deploy. Open the Vercel URL on a phone and log in.
+7. Add to home screen on each staff phone so the app opens like a normal app.
+8. Set the Vercel function region near your Supabase region so each tap is fast.
+Test checklist
+Run every item on a real phone, on mobile data as well as Wi-Fi, before Saturday.
+Access
+[ ] A wrong PIN is refused.
+[ ] Five wrong PINs trigger the 5-minute wait.
+[ ] The main screen cannot be opened without logging in.
+[ ] The database URL and service role key do not appear in the browser's page source or network calls.
+Recording
+[ ] Sign in a child. The time matches the real clock in Lagos time.
+[ ] Set the phone clock 2 hours wrong and sign in. The saved time is still correct.
+[ ] Phone 0803 123 4567 is saved as +2348031234567.
+[ ] A blank name or phone is refused.
+[ ] The same name and phone signed in twice shows a warning.
+[ ] Sign out a child. Tapping Sign out twice does not change the time.
+[ ] In the Supabase SQL editor, try to update signed_in_at. It fails.
+[ ] Try to delete a row in the SQL editor. It fails.
+Message
+[ ] Send message opens WhatsApp with the right number and the right text.
+[ ] The times in the message match the ones on screen.
+[ ] A name with an apostrophe or accent (for example O'Brien, Chidiebere) appears correctly.
+Real use
+[ ] Two phones sign in different children at the same time. Both appear on both phones after refresh.
+[ ] Sign in 30 test children. The page stays fast.
+[ ] Close the browser and reopen it. The login holds and the lists are intact.
+[ ] Delete all test rows before Saturday by running `truncate attendance_edits, attendance;` in the SQL editor.
+Saturday runbook
+Before the first child arrives
+[ ] Two staff phones charged, logged in, and added to the home screen.
+[ ] Test rows cleared and one final sign-in and sign-out tried, then removed.
+[ ] Paper sign-in sheet and a pen at the gate.
+[ ] The school's WhatsApp number is installed on the phone used for messages.
+Roles
+Person
+Job
+Staff 1 (gate)
+Signs children in and out
+Staff 2 (messages)
+Sends the parent messages as children leave, and checks the lists against the paper sheet
+Lead teacher
+Fixes typos and checks the final list
+During the day
+• Sign in each child as they arrive. Say the name back to the parent to catch typos.
+• Sign out each child at the moment they are handed over.
+• Write each arrival and departure on the paper sheet as well. This is the backup if the network fails.
+If the network drops
+• Keep writing on the paper sheet with the time.
+• When the network returns, sign in or out the children recorded on paper. The app will show the time it was entered, so note the real time in the message to the parent.
+End of day
+[ ] Everyone still in the "In school" list is signed out or accounted for.
+[ ] Every row in "Signed out today" shows "Message sent".
+[ ] Photograph the paper sheet.
+[ ] Change the staff PIN.
+Risks, open questions and later improvements
+Risk
+Likelihood
+Plan
+Internet drops at the school
+Medium
+Paper sheet backup. Staff phones on mobile data as a second route.
+A name or phone number is mistyped
+High
+Say the name back to the parent. Edit window for the lead teacher. Edits are logged.
+Staff forget to sign a child out
+Medium
+The "In school" counter is checked at the end of the day against the paper sheet.
+PIN shared too widely
+Medium
+Change it after Saturday. Names are stored on each record.
+Build runs late
+Medium
+Cut in the order given in the Build plan. Fall back to the Google Sheet and Form from the earlier plan.
+Parent has no WhatsApp
+Low
+Use the same text in an SMS from the staff phone.
+Open questions
+• About how many children are expected on Saturday?
+• What is the school's name for the message?
+• Which phone sends the parent messages?
+• Do you already have a Supabase project and a Vercel account?
+• Has the school told parents that arrival and departure times are recorded?
+Later improvements
+• Individual staff logins instead of one shared PIN.
+• QR cards so staff scan instead of typing.
+• Automatic messages by SMS or the WhatsApp Business API.
+• Student list imported once, so staff pick a name instead of typing it.
+• Daily and termly attendance reports.

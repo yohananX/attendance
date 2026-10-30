@@ -1,0 +1,23 @@
+{
+  "name": "grace-house-attendance",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Grace House School Attendance Sign-In — offline-first PWA (see docs/PRD_v1.2.md)",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "next": "16.4.3",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "typescript": "^5.9.0"
+  }
+}

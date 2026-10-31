@@ -113,9 +113,12 @@ input:focus-visible {
 }
 
 .app-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100dvh;
   width: min(100% - 40px, 1080px);
   margin: 0 auto;
-  padding: 30px 0 64px;
+  padding: 24px 0 0;
 }
 
 .app-shell--narrow {
@@ -140,10 +143,6 @@ input:focus-visible {
 .app-header {
   min-height: 64px;
   padding: 10px 16px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-lg);
-  background: var(--panel);
-  box-shadow: 0 8px 24px var(--shadow);
 }
 
 .header-brand {
@@ -235,11 +234,10 @@ h3 {
 }
 
 .attendance-board {
-  overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-lg);
-  background: var(--panel);
-  box-shadow: 0 14px 40px var(--shadow-strong);
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-bottom: 280px;
 }
 
 .list-tools {
@@ -325,13 +323,17 @@ h3 {
 
 /* ---- Sign-in form ---- */
 
-.sign-in-card {
-  margin-top: 20px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-lg);
+.sign-in {
+  position: fixed;
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(100% - 40px, 1080px);
+  box-sizing: border-box;
+  padding: 12px 0 26px;
+  border-top: 1px solid var(--line);
   background: var(--panel);
-  box-shadow: 0 8px 24px var(--shadow);
-  padding: 0;
+  z-index: 10;
 }
 
 .sign-in-body {
@@ -1147,8 +1149,8 @@ h3 {
     padding: 12px;
   }
 
-  .sign-in-card {
-    padding: 0;
+  .sign-in {
+    padding: 10px 0 24px;
   }
 
   .sign-in-body {

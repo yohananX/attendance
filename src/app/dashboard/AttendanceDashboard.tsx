@@ -855,7 +855,7 @@ export default function AttendanceDashboard({ schoolName }: { schoolName: string
         )}
       </section>
 
-      <section className="sign-in-card" aria-labelledby="sign-in-title">
+      <section className="sign-in" aria-labelledby="sign-in-title">
         <div className="sign-in-body">
           <div className="section-heading">
             <h2 id="sign-in-title">Sign in a child</h2>

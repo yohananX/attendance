@@ -2,9 +2,9 @@
 
 Simple, phone-first attendance for a single Grace House School Saturday
 session. Staff sign in, record arrivals and departures, and open a pre-filled
-WhatsApp message for each parent. Once a staff member has signed in online,
-attendance can be captured without a connection and synchronised when service
-returns.
+arrival or departure WhatsApp message for each parent. Once a staff member has
+signed in online, attendance can be captured without a connection and
+synchronised when service returns.
 
 ## Project documents (authoritative baseline — do not edit casually)
 
@@ -111,8 +111,9 @@ node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
   PD-D1 configurable late-sync settings (`app_settings`, 7-day default), and
   the `health_privilege_check()` RPC.
 - ✅ Staff PIN login and 12-hour server session cookie.
-- ✅ Single-screen sign-in/sign-out flow, parent WhatsApp handoff, and local
-  IndexedDB storage with an automatic sync attempt when connectivity returns.
+- ✅ Single-screen sign-in/sign-out flow, parent arrival/departure WhatsApp
+  handoff, and local IndexedDB storage with an automatic sync attempt when
+  connectivity returns.
 - ✅ Day review with CSV export of student name, parent phone, sign-in, and
   sign-out times.
 - ⚠️ Offline access is device-local and intended for this simple one-session

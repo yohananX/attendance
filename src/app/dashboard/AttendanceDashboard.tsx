@@ -20,7 +20,7 @@ import {
   updatePendingEvent,
 } from "@/lib/attendance-store";
 import { normalizePhone } from "@/lib/phone";
-import { buildMessage, buildWhatsAppUrl } from "@/lib/whatsapp";
+import { buildSignInMessage, buildSignOutMessage, buildWhatsAppUrl } from "@/lib/whatsapp";
 
 interface ServerDay {
   dayKey: string;
@@ -418,13 +418,24 @@ export default function AttendanceDashboard({ schoolName }: { schoolName: string
     }
   }
 
-  async function handleMessage(record: AttendanceRecord) {
-    if (!record.signedInAt || !record.signedOutAt || !online) return;
+  async function handleMessage(record: AttendanceRecord, type: "sign_in" | "sign_out") {
+    if (!record.signedInAt || !online || (type === "sign_out" && !record.signedOutAt)) return;
     setOpeningMessage((current) => new Set(current).add(record.sessionRef));
     setPageError("");
-    const signInTime = formatTime(record.signedInAt);
-    const signOutTime = formatTime(record.signedOutAt);
-    const message = buildMessage(record.studentName, signInTime, signOutTime, schoolName, formatDayKey(dayKey));
+    const message = type === "sign_in"
+      ? buildSignInMessage(
+        record.studentName,
+        formatTime(record.signedInAt),
+        schoolName,
+        formatDayKey(dayKey),
+      )
+      : buildSignOutMessage(
+        record.studentName,
+        formatTime(record.signedInAt),
+        formatTime(record.signedOutAt),
+        schoolName,
+        formatDayKey(dayKey),
+      );
     const opened = window.open(buildWhatsAppUrl(message, record.parentPhone), "_blank");
     if (!opened) {
       setPageError("WhatsApp could not be opened. Check your browser’s pop-up settings or copy the number and times.");
@@ -436,6 +447,16 @@ export default function AttendanceDashboard({ schoolName }: { schoolName: string
       return;
     }
     opened.opener = null;
+
+    if (type === "sign_in") {
+      setNotice("WhatsApp opened. Check the message before sending.");
+      setOpeningMessage((current) => {
+        const next = new Set(current);
+        next.delete(record.sessionRef);
+        return next;
+      });
+      return;
+    }
 
     try {
       const response = await fetch(
@@ -464,7 +485,7 @@ export default function AttendanceDashboard({ schoolName }: { schoolName: string
 
   async function handleCopy(record: AttendanceRecord) {
     if (!record.signedInAt || !record.signedOutAt) return;
-    const message = buildMessage(
+    const message = buildSignOutMessage(
       record.studentName,
       formatTime(record.signedInAt),
       formatTime(record.signedOutAt),
@@ -614,13 +635,23 @@ export default function AttendanceDashboard({ schoolName }: { schoolName: string
                     <span className={sync.className}>{sync.label}</span>
                     {record.syncError && <span className="sync-error">{record.syncError}</span>}
                   </div>
-                  <button
-                    className="button button-checkout"
-                    disabled={signingOut.has(record.sessionRef)}
-                    onClick={() => void handleSignOut(record)}
-                  >
-                    {signingOut.has(record.sessionRef) ? "Saving…" : "Sign out"}
-                  </button>
+                  <div className="arrival-actions">
+                    <button
+                      className="button button-message"
+                      disabled={!online || openingMessage.has(record.sessionRef)}
+                      onClick={() => void handleMessage(record, "sign_in")}
+                      title={!online ? "Connect to the internet to open WhatsApp" : undefined}
+                    >
+                      {openingMessage.has(record.sessionRef) ? "Opening…" : "Send msg"}
+                    </button>
+                    <button
+                      className="button button-checkout"
+                      disabled={signingOut.has(record.sessionRef)}
+                      onClick={() => void handleSignOut(record)}
+                    >
+                      {signingOut.has(record.sessionRef) ? "Saving…" : "Sign out"}
+                    </button>
+                  </div>
                 </li>
               );
             })}
@@ -655,10 +686,10 @@ export default function AttendanceDashboard({ schoolName }: { schoolName: string
                       <button
                         className="button button-message"
                         disabled={!online || openingMessage.has(record.sessionRef)}
-                        onClick={() => void handleMessage(record)}
+                        onClick={() => void handleMessage(record, "sign_out")}
                         title={!online ? "Connect to the internet to open WhatsApp" : undefined}
                       >
-                        {openingMessage.has(record.sessionRef) ? "Opening…" : "WhatsApp"}
+                        {openingMessage.has(record.sessionRef) ? "Opening…" : "Send msg"}
                       </button>
                     ) : (
                       <span className="message-opened">WhatsApp opened</span>

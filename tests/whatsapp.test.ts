@@ -1,35 +1,53 @@
 import { describe, expect, it } from "vitest";
-import { buildMessage, buildWhatsAppUrl } from "../src/lib/whatsapp";
+import {
+  buildSignInMessage,
+  buildSignOutMessage,
+  buildWhatsAppUrl,
+} from "../src/lib/whatsapp";
 
-describe("lib/whatsapp — buildMessage (T7)", () => {
-  it("includes school name, student name and both Lagos 12-hour times", () => {
-    const message = buildMessage("O'Brien", "8:40 AM", "1:15 PM", "Grace House School");
-    expect(message).toContain("Grace House School");
-    expect(message).toContain("O'Brien");
-    expect(message).toContain("Signed in: 8:40 AM");
-    expect(message).toContain("Signed out: 1:15 PM");
+describe("WhatsApp attendance messages", () => {
+  it("builds a short arrival note with the sign-in time", () => {
+    expect(buildSignInMessage(
+      "Ada Lovelace",
+      "8:40 AM",
+      "Grace House School",
+      "Saturday, 31 October 2026",
+    )).toBe([
+      "Grace House School",
+      "",
+      "Ada Lovelace has arrived at school.",
+      "Sign-in: 8:40 AM",
+      "Date: Saturday, 31 October 2026",
+    ].join("\n"));
   });
 
-  it("closes with a privacy sentence about logging only the link opening", () => {
-    const message = buildMessage("Chidiebere", "9:00 AM", "12:30 PM", "Grace House School");
-    expect(message).toContain("runbook");
-    expect(message).toContain("link was opened");
+  it("builds a short departure note with both attendance times", () => {
+    expect(buildSignOutMessage(
+      "Ada Lovelace",
+      "8:40 AM",
+      "1:15 PM",
+      "Grace House School",
+    )).toBe([
+      "Grace House School",
+      "",
+      "Ada Lovelace has left school.",
+      "Sign-in: 8:40 AM",
+      "Sign-out: 1:15 PM",
+    ].join("\n"));
   });
 
-  it("never claims the message was sent or delivered (BR-13, AC-G8)", () => {
-    const message = buildMessage("Ada Lovelace", "12:00 AM", "11:59 PM", "X School");
-    const lower = message.toLowerCase();
-    expect(lower).not.toContain("sent");
-    expect(lower).not.toContain("delivered");
+  it("does not add app or runbook explanations to the parent message", () => {
+    const message = buildSignOutMessage("Chidiebere", "9:00 AM", "12:30 PM", "Grace House School");
+    expect(message).not.toContain("runbook");
+    expect(message).not.toContain("link was opened");
+    expect(message).not.toContain("actual sending");
   });
 });
 
-describe("lib/whatsapp — buildWhatsAppUrl (T7)", () => {
+describe("buildWhatsAppUrl", () => {
   it("builds a wa.me deep link with the pre-filled, URI-encoded message", () => {
-    const message = buildMessage("O'Brien", "8:40 AM", "1:15 PM", "Grace House School");
-    const url = buildWhatsAppUrl(message);
-    expect(url).toBe("https://wa.me/?text=" + encodeURIComponent(message));
-    expect(url.startsWith("https://wa.me/")).toBe(true);
+    const message = buildSignInMessage("O'Brien", "8:40 AM", "Grace House School");
+    expect(buildWhatsAppUrl(message)).toBe("https://wa.me/?text=" + encodeURIComponent(message));
   });
 
   it("encodes characters that would break the URL", () => {

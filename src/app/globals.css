@@ -195,6 +195,7 @@ h1, h2, p { margin-top: 0; }
 .sync-label--pending { color: var(--amber); }
 .sync-label--failed, .sync-error { color: var(--red); }
 .sync-error { flex-basis: 100%; font-size: 11px; }
+.arrival-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 5px; }
 .button-checkout { min-width: 78px; min-height: 34px; padding: 0 10px; background: var(--green-pale); color: var(--green-dark); }
 .checked-out-section { margin-top: 18px; }
 .message-actions { display: flex; align-items: center; gap: 6px; }
@@ -311,6 +312,7 @@ h1, h2, p { margin-top: 0; }
   .student-card { gap: 6px; padding: 7px; }
   .student-details { gap: 2px 6px; }
   .student-name { font-size: 13px; }
+  .arrival-actions { gap: 3px; }
   .button-checkout { min-width: 70px; padding: 0 7px; font-size: 12px; }
   .message-actions { gap: 2px; }
 }

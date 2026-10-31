@@ -652,6 +652,7 @@ export default function AttendanceDashboard({ schoolName }: { schoolName: string
             width={1000}
             height={368}
           />
+          <div className="brand-date">{dateLabel}</div>
         </div>
         <div className="header-tools">
           <a className="text-button" href="/review">Day review</a>
@@ -665,11 +666,6 @@ export default function AttendanceDashboard({ schoolName }: { schoolName: string
           </button>
         </div>
       </header>
-
-      <section className="day-intro">
-        <h1>Saturday lesson</h1>
-        <p className="date-line">{dateLabel}</p>
-      </section>
 
       {!online && <p className="offline-note" role="status">Offline · records saved on this phone</p>}
       {!datasetVerified && !datasetResetRequired && (
@@ -818,6 +814,7 @@ export default function AttendanceDashboard({ schoolName }: { schoolName: string
                     <div className="student-details">
                       <div className="student-identity">
                         <strong className="student-name">{record.studentName}</strong>
+                        <span className="student-divider">•</span>
                         <span className="student-phone">{record.parentPhone}</span>
                         <span className={sync.className}>{sync.label}</span>
                       </div>

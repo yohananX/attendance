@@ -158,6 +158,24 @@ input:focus-visible {
   height: auto;
 }
 
+.brand-date {
+  color: var(--ink-soft);
+  font-size: 12px;
+  margin-top: 3px;
+}
+
+@media (max-width: 700px) {
+  .brand-logo {
+    width: 160px;
+  }
+}
+
+@media (max-width: 380px) {
+  .brand-logo {
+    width: 96px;
+  }
+}
+
 .staff-line {
   color: var(--ink-soft);
   font-size: 12.5px;
@@ -645,10 +663,18 @@ h3 {
 }
 
 .student-card--completed {
-  background: var(--surface);
-  border-radius: var(--radius);
-  margin: 4px 0;
-  padding: 11px 0;
+  min-height: 84px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 13px 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+}
+
+.student-card--completed:last-child {
+  border-bottom: 0;
 }
 
 .student-details {
@@ -666,6 +692,12 @@ h3 {
   gap: 1px;
 }
 
+.student-divider {
+  color: var(--ink-faint);
+  font-size: 12px;
+  margin: 0 2px;
+}
+
 .student-name {
   overflow: hidden;
   font-size: 15px;
@@ -673,6 +705,7 @@ h3 {
   letter-spacing: -0.01em;
   text-overflow: ellipsis;
   white-space: nowrap;
+  min-width: 0;
 }
 
 .student-phone {
@@ -1124,10 +1157,6 @@ h3 {
   .student-card {
     flex-wrap: wrap;
     gap: 10px;
-  }
-
-  .student-card--completed {
-    margin: 6px 0;
   }
 
   .student-details {

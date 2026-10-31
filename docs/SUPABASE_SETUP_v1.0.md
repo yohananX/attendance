@@ -30,10 +30,18 @@ After applying, all five tables will exist with RLS enabled and **no policies** 
 
 ## 4) Verify
 1. Start the dev server: `npm run dev`
-2. Visit `http://localhost:3000/api/health` — with correct config it should return `{ "ok": true, "serverTime": "...", "dbReady": true/false, "schema": "..." }`. Note: the health endpoint behavior may change during remediation; see the T1.2 remediation plan.
+2. Check the health endpoint. `/api/health` is now **operator-authenticated**: it requires an `x-health-secret` header matching `HEALTH_CHECK_SECRET` (set in `.env.local` / Vercel env vars), otherwise it returns `401`. With a valid secret it returns `{ "ok": true, "serverTime": "...", "dbReady": true/false }`. `dbReady` is `true` only when the connectivity probe succeeds **and** a privileged-capability check confirms the call runs as the service role (not the anon key). Without Supabase credentials it returns `dbReady: false` / `503`.
+   ```powershell
+   # Example (replace <secret> with your HEALTH_CHECK_SECRET):
+   curl http://localhost:3000/api/health -H "x-health-secret: <secret>"
+   ```
 3. Check build: `npm run typecheck && npm run build`
 
+## Migration notes
+The migration seeds `app_settings` with PD-D1/Q5 configuration defaults (`late_sync_window_days = 7`, `clock_tolerance_minutes = 5`, `future_tolerance_minutes = 5`). These are **configuration, never hard-coded**; adjust `app_settings` rather than editing the migration when thresholds change.
+
 ## Notes
+...
 - The browser never talks to Supabase directly. All access is server-side via `src/lib/supabase/server.ts` using the service role key.
 - Never commit `.env.local` or credentials.
 - Do **not** apply migrations to production without explicit approval and verification.

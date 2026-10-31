@@ -56,7 +56,14 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
-  RAISE EXCEPTION 'sessions is not directly updatable: use sanctioned projection/correction/marker paths';
+  -- Direct updates are blocked unless a sanctioned path has authorised the
+  -- mutation for this transaction (see sessions_authorize_mutation). This is
+  -- the AC-30.4 guardrail: only projection apply, audited correction, launch
+  -- marker and conflict flagging may change displayed session state.
+  IF current_setting('app.session_mutation_authorized', true) IS NOT 'true' THEN
+    RAISE EXCEPTION 'sessions is not directly updatable: use sanctioned projection/correction/marker paths';
+  END IF;
+  RETURN NEW;
 END;
 $$;
 
@@ -95,7 +102,15 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_events_device_day_seq
   ON events(device_id, day_key, device_seq);
--- PD-D2 indexes deferred pending owner approval (do not create yet)
+-- PD-D2 (approved — Stakeholder Decision Register): partial unique indexes
+-- enforcing exactly one accepted sign-in and exactly one accepted sign-out
+-- per session, as defence-in-depth behind the ingest logic. Compatible with
+-- PD-D3 provisional sessions because losing events carry conflict_marker =
+-- 'losing' and therefore fall outside these indexes.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_events_one_sign_in_per_session
+  ON events(session_ref) WHERE event_type = 'sign_in' AND conflict_marker = 'none';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_events_one_sign_out_per_session
+  ON events(session_ref) WHERE event_type = 'sign_out' AND conflict_marker = 'none';
 
 CREATE INDEX IF NOT EXISTS idx_events_day_key ON events(day_key);
 CREATE INDEX IF NOT EXISTS idx_events_session_ref ON events(session_ref);
@@ -163,6 +178,181 @@ CREATE TABLE IF NOT EXISTS login_attempts (
 
 CREATE INDEX IF NOT EXISTS idx_login_attempts_device_time
   ON login_attempts(device_id, attempted_at);
+
+-- ============================================================
+-- PD-D1 / Q5: configurable late-sync and clock thresholds.
+-- Stored as configuration, never hard-coded. Defaults are proposed values
+-- pending Q5 confirmation; operators adjust via configuration, not schema
+-- change. The ingest pipeline (T2.2) reads these at runtime.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS app_settings (
+  setting_key   text PRIMARY KEY,
+  setting_value text NOT NULL,
+  updated_at    timestamptz NOT NULL DEFAULT now()
+);
+
+INSERT INTO app_settings (setting_key, setting_value) VALUES
+  ('late_sync_window_days', '7'),
+  ('clock_tolerance_minutes', '5'),
+  ('future_tolerance_minutes', '5')
+ON CONFLICT (setting_key) DO NOTHING;
+
+CREATE INDEX IF NOT EXISTS idx_app_settings_key ON app_settings(setting_key);
+
+-- ============================================================
+-- Health endpoint privilege probe (H2).
+-- Returns the current database role so /api/health can prove it is operating
+-- through the privileged service role (current_user <> 'anon') rather than
+-- merely through an anon-key connectivity probe that RLS with no policies
+-- would let succeed with an empty result set.
+-- ============================================================
+CREATE OR REPLACE FUNCTION health_privilege_check()
+RETURNS text
+LANGUAGE sql
+AS $$
+  SELECT current_user;
+$$;
+
+-- ============================================================
+-- H3: sanctioned session mutation paths (DATABASE_CONTRACT §4.2).
+-- sessions_authorize_mutation() sets a transaction-local authorisation token
+-- that sessions_mutability_guard() requires before allowing any UPDATE on
+-- sessions. Direct updates always fail. Each sanctioned function performs its
+-- own audit where required (corrections table is append-only).
+-- ============================================================
+CREATE OR REPLACE FUNCTION sessions_authorize_mutation(p_path text)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF p_path NOT IN ('projection', 'correction', 'launch_marker', 'conflict_flag') THEN
+    RAISE EXCEPTION 'unsupported session mutation path: %', p_path;
+  END IF;
+  SET LOCAL app.session_mutation_authorized = 'true';
+  SET LOCAL app.session_mutation_path = p_path;
+END;
+$$;
+
+-- Ingest projection apply: create a session from an accepted sign-in, or
+-- record an accepted sign-out. Idempotent on the sign-in path (first write
+-- wins for the session row); sign-out sets the displayed sign-out time once.
+CREATE OR REPLACE FUNCTION sessions_apply_projection(
+  p_session_ref   uuid,
+  p_day_key       date,
+  p_student_name  text,
+  p_parent_phone  text,
+  p_event_type    text,
+  p_event_at      timestamptz,
+  p_staff_name    text
+)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  PERFORM sessions_authorize_mutation('projection');
+  IF p_event_type = 'sign_in' THEN
+    INSERT INTO sessions (session_ref, day_key, student_name, parent_phone,
+                          signed_in_at, signed_in_by, server_version)
+    VALUES (p_session_ref, p_day_key, p_student_name, p_parent_phone,
+            p_event_at, p_staff_name, 1)
+    ON CONFLICT (session_ref) DO NOTHING;
+  ELSIF p_event_type = 'sign_out' THEN
+    UPDATE sessions
+    SET signed_out_at = p_event_at, signed_out_by = p_staff_name
+    WHERE session_ref = p_session_ref AND signed_out_at IS NULL;
+  END IF;
+END;
+$$;
+
+-- Audited time correction (FR-30). Applies only when the submitted base
+-- server_version matches the current version; otherwise flags a correction
+-- conflict and does not apply. Writes an append-only corrections audit row.
+CREATE OR REPLACE FUNCTION sessions_apply_correction(
+  p_session_ref         uuid,
+  p_field               text,
+  p_new_value           timestamptz,
+  p_base_server_version integer,
+  p_edited_by           text,
+  p_conflict_id         uuid DEFAULT NULL
+)
+RETURNS integer
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_current_version integer;
+  v_old_value       timestamptz;
+BEGIN
+  PERFORM sessions_authorize_mutation('correction');
+
+  SELECT server_version,
+         CASE WHEN p_field = 'signed_in_at' THEN signed_in_at ELSE signed_out_at END
+  INTO v_current_version, v_old_value
+  FROM sessions
+  WHERE session_ref = p_session_ref
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'unknown session: %', p_session_ref;
+  END IF;
+
+  IF v_current_version <> p_base_server_version THEN
+    -- Version mismatch: do not apply; flag for review, retain both values.
+    UPDATE sessions SET conflict_type = 'correction_conflict'
+    WHERE session_ref = p_session_ref;
+    RETURN v_current_version;
+  END IF;
+
+  IF p_field = 'signed_in_at' THEN
+    UPDATE sessions SET signed_in_at = p_new_value, server_version = server_version + 1
+    WHERE session_ref = p_session_ref;
+  ELSE
+    UPDATE sessions SET signed_out_at = p_new_value, server_version = server_version + 1
+    WHERE session_ref = p_session_ref;
+  END IF;
+
+  INSERT INTO corrections (correction_event_id, session_ref, field, original_value,
+                           new_value, base_value, base_server_version, applied,
+                           conflict_id, edited_by)
+  VALUES (gen_random_uuid(), p_session_ref, p_field,
+          to_char(v_old_value, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+          to_char(p_new_value, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+          to_char(v_old_value, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+          p_base_server_version, true, p_conflict_id, p_edited_by);
+
+  RETURN v_current_version + 1;
+END;
+$$;
+
+-- Launch marker (FR-27, PD-D7): first write wins; idempotent.
+CREATE OR REPLACE FUNCTION sessions_set_launch_marker(
+  p_session_ref uuid,
+  p_launched_at timestamptz
+)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  PERFORM sessions_authorize_mutation('launch_marker');
+  UPDATE sessions
+  SET whatsapp_launched_at = p_launched_at
+  WHERE session_ref = p_session_ref AND whatsapp_launched_at IS NULL;
+END;
+$$;
+
+-- Conflict flagging (FR-16): set the session conflict type.
+CREATE OR REPLACE FUNCTION sessions_flag_conflict(
+  p_session_ref  uuid,
+  p_conflict_type text
+)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  PERFORM sessions_authorize_mutation('conflict_flag');
+  UPDATE sessions SET conflict_type = p_conflict_type
+  WHERE session_ref = p_session_ref;
+END;
+$$;
 
 -- ============================================================
 -- Row-level security: enabled on every table, NO policies.

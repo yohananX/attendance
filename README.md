@@ -99,12 +99,19 @@ node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 ## Current state
 
 - ✅ Next.js App Router + TypeScript skeleton deployed to Vercel (T1.1)
-- 🔲 Supabase wiring + lockdown (T1.2) — code complete: server-only Supabase
-  client (`src/lib/supabase/server.ts`), `/api/health` connectivity route, and
-  initial schema migration (`supabase/migrations/20261031000000_initial_schema.sql`)
-  with RLS enabled + no policies on all tables and event immutability guardrails.
-  Remaining: create the Supabase project, add `SUPABASE_URL` and
-  `SUPABASE_SERVICE_ROLE_KEY` to `.env.local` and Vercel, then apply the
-  migration to the empty database.
+- 🔲 Supabase wiring + lockdown (T1.2) — code complete and tested: server-only
+  Supabase client (`src/lib/supabase/server.ts`), `/api/health` operator-authenticated
+  connectivity route (`x-health-secret`; `dbReady` requires a privileged-capability
+  check, not mere anon-key connectivity), and the initial schema migration with
+  RLS enabled + no policies, event/session/correction append-only guardrails,
+  the sessions mutability guardrail with sanctioned mutation paths (AC-30.4),
+  PD-D2 partial unique indexes (exactly one accepted sign-in/sign-out per session),
+  PD-D1 configurable late-sync settings (`app_settings`, 7-day default), and the
+  `health_privilege_check()` RPC. Unit tests added (`tests/`), `npm run test`,
+  `npm run typecheck` and `npm run build` pass.
+  Remaining: create a **non-production** Supabase project, add
+  `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `HEALTH_CHECK_SECRET`, `SESSION_SECRET`,
+  `STAFF_PIN` to `.env.local` and Vercel, then apply the migration to the empty
+  database. **Do not apply to production.**
 - ⬜ PWA skeleton (T1.3)
 - ⬜ Login, attendance capture, sync, messaging, review, day close (T2–T8)

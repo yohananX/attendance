@@ -75,6 +75,7 @@ export default function AttendanceDashboard({ schoolName }: { schoolName: string
   const [records, setRecords] = useState<AttendanceRecord[]>([]);
   const [staff, setStaff] = useState<LoginSession | null>(null);
   const [ready, setReady] = useState(false);
+  const [redirecting, setRedirecting] = useState(false);
   const [online, setOnline] = useState(true);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
@@ -200,6 +201,13 @@ export default function AttendanceDashboard({ schoolName }: { schoolName: string
 
   useEffect(() => {
     let active = true;
+    let shouldRedirect = false;
+    const redirectToLogin = (path: string) => {
+      shouldRedirect = true;
+      if (!active) return;
+      setRedirecting(true);
+      window.location.replace(path);
+    };
     const updateOnline = () => setOnline(navigator.onLine);
     window.addEventListener("online", updateOnline);
     window.addEventListener("offline", updateOnline);
@@ -214,28 +222,30 @@ export default function AttendanceDashboard({ schoolName }: { schoolName: string
               credentials: "include",
               cache: "no-store",
             });
-            if (response.ok) {
-              const data = await response.json() as { staffName: string; expiresAt?: number };
-              const session = cached?.staffName === data.staffName
-                ? cached
-                : saveCachedStaffSession(data.staffName, data.expiresAt);
-              if (active) setStaff(session);
-            } else {
+            if (response.status === 401) {
               clearCachedStaffSession();
-              router.replace("/login");
+              redirectToLogin("/login");
               return;
             }
+            if (!response.ok) {
+              throw new Error("Could not check the staff session.");
+            }
+            const data = await response.json() as { staffName: string; expiresAt?: number };
+            const session = cached?.staffName === data.staffName
+              ? cached
+              : saveCachedStaffSession(data.staffName, data.expiresAt);
+            if (active) setStaff(session);
           } catch {
             if (cached && active) setStaff(cached);
             else {
-              router.replace("/login?offline=1");
+              redirectToLogin("/login?offline=1");
               return;
             }
           }
         } else if (cached) {
           if (active) setStaff(cached);
         } else {
-          router.replace("/login?offline=1");
+          redirectToLogin("/login?offline=1");
           return;
         }
 
@@ -259,7 +269,7 @@ export default function AttendanceDashboard({ schoolName }: { schoolName: string
             : "Could not open attendance saved on this phone.");
         }
       } finally {
-        if (active) {
+        if (active && !shouldRedirect) {
           setReady(true);
           setLoading(false);
         }
@@ -272,7 +282,7 @@ export default function AttendanceDashboard({ schoolName }: { schoolName: string
       window.removeEventListener("online", updateOnline);
       window.removeEventListener("offline", updateOnline);
     };
-  }, [refreshFromServer, refreshLocal, router, syncPending]);
+  }, [refreshFromServer, refreshLocal, syncPending]);
 
   useEffect(() => {
     if (!online || !ready) return;
@@ -505,11 +515,15 @@ export default function AttendanceDashboard({ schoolName }: { schoolName: string
       setNotice("Reconnect to log out. Your offline attendance session will stay available on this phone.");
       return;
     }
-    clearCachedStaffSession();
     try {
-      await fetch("/logout", { method: "POST", credentials: "include" });
-    } finally {
-      router.replace("/login");
+      const response = await fetch("/logout", { method: "POST", credentials: "include" });
+      if (!response.ok) {
+        throw new Error("Could not log out. Please try again.");
+      }
+      clearCachedStaffSession();
+      window.location.replace("/login");
+    } catch (error) {
+      setPageError(error instanceof Error ? error.message : "Could not log out. Please try again.");
     }
   }
 
@@ -518,7 +532,9 @@ export default function AttendanceDashboard({ schoolName }: { schoolName: string
   if (!ready || !staff) {
     return (
       <main className="app-shell app-shell--narrow">
-        <p className="loading-message">{loading ? "Opening attendance…" : "Please sign in to continue."}</p>
+        <p className="loading-message">
+          {redirecting ? "Taking you to log in…" : loading ? "Opening attendance…" : "Could not open attendance."}
+        </p>
       </main>
     );
   }

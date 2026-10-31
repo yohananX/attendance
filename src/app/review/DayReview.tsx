@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
 
 import { buildAttendanceCsv } from "@/lib/attendance-csv";
 import {
@@ -40,7 +39,6 @@ function formatDay(dayKey: string): string {
 }
 
 export default function DayReview() {
-  const router = useRouter();
   const [dayKey] = useState(currentLagosDay);
   const [records, setRecords] = useState<AttendanceRecord[]>([]);
   const [online, setOnline] = useState(true);
@@ -60,7 +58,7 @@ export default function DayReview() {
       });
       if (response.status === 401) {
         clearCachedStaffSession();
-        router.replace("/login");
+        window.location.replace("/login");
         return;
       }
       if (!response.ok) throw new Error("Could not load today’s attendance.");
@@ -72,11 +70,11 @@ export default function DayReview() {
     } finally {
       setLoading(false);
     }
-  }, [dayKey, router]);
+  }, [dayKey]);
 
   useEffect(() => {
     if (!getCachedStaffSession()) {
-      router.replace("/login");
+      window.location.replace("/login");
       return;
     }
     const handleOnline = () => {
@@ -92,7 +90,7 @@ export default function DayReview() {
       window.removeEventListener("online", handleOnline);
       window.removeEventListener("offline", handleOffline);
     };
-  }, [loadRecords, router]);
+  }, [loadRecords]);
 
   function exportCsv() {
     const csv = buildAttendanceCsv(records, formatTime);

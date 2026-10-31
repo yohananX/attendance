@@ -5,7 +5,7 @@ export default function manifest(): MetadataRoute.Manifest {
     name: "Grace House School Attendance",
     short_name: "Grace House",
     description: "Offline-first attendance sign-in for Grace House School.",
-    start_url: "/",
+    start_url: "/dashboard",
     display: "standalone",
     background_color: "#ffffff",
     theme_color: "#1a5c46",

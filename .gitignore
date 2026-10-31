@@ -22,3 +22,6 @@ coverage/
 
 .DS_Store
 *.log
+
+# Editor / scratch artifacts — not part of the app
+.kilo/

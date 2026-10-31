@@ -1,11 +1,10 @@
 # Grace House School Attendance
 
-Offline-first attendance sign-in PWA for Grace House School's Saturday lessons.
-Staff sign children in and out on their phones (works in airplane mode), and a
-timestamped WhatsApp message is prepared for each parent.
-
-This repository currently contains the **deployment skeleton (task T1.1)** plus
-the approved planning documents. Attendance features are not yet implemented.
+Simple, phone-first attendance for a single Grace House School Saturday
+session. Staff sign in, record arrivals and departures, and open a pre-filled
+WhatsApp message for each parent. Once a staff member has signed in online,
+attendance can be captured without a connection and synchronised when service
+returns.
 
 ## Project documents (authoritative baseline — do not edit casually)
 
@@ -23,7 +22,8 @@ the approved planning documents. Attendance features are not yet implemented.
 - **Supabase (Postgres)** — server-only access via the service-role key; the
   browser never talks to Supabase (S2/S3)
 - **Vercel** — HTTPS hosting and environment variables
-- **PWA (service worker + IndexedDB)** — offline-first capture (planned, T1.3/T4.x)
+- **PWA (service worker + IndexedDB)** — cached app shell and device-local
+  attendance outbox for offline capture
 
 ## Local setup
 
@@ -61,6 +61,7 @@ them into pages, and never send them to the browser:
 | `SUPABASE_URL` | Supabase project URL (server-side) |
 | `SUPABASE_SERVICE_ROLE_KEY` | Service-role key; server-only even in Vercel |
 | `SESSION_SECRET` | Signs the session cookie (12-hour expiry, FR-02) |
+| `HEALTH_CHECK_SECRET` | Protects the operator-only `/api/health` endpoint |
 | `STAFF_PIN` | Staff PIN, verified server-side only (FR-01) |
 | `SCHOOL_NAME` | Public school name shown in the app and messages |
 
@@ -76,7 +77,8 @@ node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
    `yohananX/attendance` GitHub repo, or via CLI: `vercel link`).
    Vercel auto-detects Next.js; no build configuration is needed.
 2. In **Project → Settings → Environment Variables**, add `SUPABASE_URL`,
-   `SUPABASE_SERVICE_ROLE_KEY`, `SESSION_SECRET`, `STAFF_PIN`, `SCHOOL_NAME`
+   `SUPABASE_SERVICE_ROLE_KEY`, `SESSION_SECRET`, `HEALTH_CHECK_SECRET`,
+   `STAFF_PIN`, `SCHOOL_NAME`
    for Production (and Preview/Staging if wanted). Mark the secret ones as
    sensitive. They must **not** be exposed to the browser — Next.js only sends
    `NEXT_PUBLIC_*` vars to client code, so keep the `NEXT_PUBLIC_` prefix off
@@ -99,19 +101,23 @@ node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 ## Current state
 
 - ✅ Next.js App Router + TypeScript skeleton deployed to Vercel (T1.1)
-- 🔲 Supabase wiring + lockdown (T1.2) — code complete and tested: server-only
+- ✅ Supabase wiring + lockdown (T1.2) — server-only
   Supabase client (`src/lib/supabase/server.ts`), `/api/health` operator-authenticated
   connectivity route (`x-health-secret`; `dbReady` requires a privileged-capability
   check, not mere anon-key connectivity), and the initial schema migration with
   RLS enabled + no policies, event/session/correction append-only guardrails,
   the sessions mutability guardrail with sanctioned mutation paths (AC-30.4),
   PD-D2 partial unique indexes (exactly one accepted sign-in/sign-out per session),
-  PD-D1 configurable late-sync settings (`app_settings`, 7-day default), and the
-  `health_privilege_check()` RPC. Unit tests added (`tests/`), `npm run test`,
-  `npm run typecheck` and `npm run build` pass.
-  Remaining: create a **non-production** Supabase project, add
-  `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `HEALTH_CHECK_SECRET`, `SESSION_SECRET`,
-  `STAFF_PIN` to `.env.local` and Vercel, then apply the migration to the empty
-  database. **Do not apply to production.**
-- ⬜ PWA skeleton (T1.3)
-- ⬜ Login, attendance capture, sync, messaging, review, day close (T2–T8)
+  PD-D1 configurable late-sync settings (`app_settings`, 7-day default), and
+  the `health_privilege_check()` RPC.
+- ✅ Staff PIN login and 12-hour server session cookie.
+- ✅ Single-screen sign-in/sign-out flow, parent WhatsApp handoff, and local
+  IndexedDB storage with an automatic sync attempt when connectivity returns.
+- ✅ Day review with CSV export of student name, parent phone, sign-in, and
+  sign-out times.
+- ⚠️ Offline access is device-local and intended for this simple one-session
+  workflow. Staff must log in online first; local pending attendance remains
+  on that browser until it syncs. Avoid clearing browser data before sync.
+- ⬜ Production setup still needs a Supabase project/database migration,
+  production secrets, and a Vercel deployment. Test the complete offline and
+  reconnect flow on the actual phones before relying on it for attendance.

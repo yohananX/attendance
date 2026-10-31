@@ -1,8 +1,8 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  // Intentionally minimal. Offline-first app-shell work (service worker,
-  // manifest) arrives with T1.3 per docs/IMPLEMENTATION_PLAN_v1.0.md §1.
+  // The app shell, manifest, and offline capture flow are implemented in
+  // public/sw.js and the attendance screens.
 };
 
 export default nextConfig;

@@ -55,6 +55,8 @@ Until approval is recorded:
 - Keep unresolved thresholds configurable where practical.
 - Record the final decision, approver and date in the project documentation.
 
+**Registry approval gate:** SR-1 through SR-8 must receive **explicit owner approval** before any Phase 2 schema migration or student-registry API (R1–R7) implementation begins. Until approval is recorded, no `students` table, no `student_id` foreign key, and no registry endpoints may be implemented. Phase 0 and Phase 1 may proceed independently of this gate; Phase 3 student-selection UI is additionally blocked until SR-4 (capture workflow) is explicitly approved.
+
 ---
 
 ## 3. Sign-off record

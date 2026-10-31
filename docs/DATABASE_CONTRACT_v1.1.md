@@ -64,8 +64,8 @@ Stable student identity, separate from attendance sessions.
 | Kind | Definition | Purpose |
 |---|---|---|
 | PK | `student_id` | Stable identity. |
-| Partial unique | `LOWER(student_name)`, `parent_phone` WHERE `is_active = true` | Prevents two active students with the same normalised name+phone (SR-1 pending). Deactivated records do not collide. |
-| Index | `parent_phone` | Lookup by phone when finding a returning student. |
+| Partial unique | Canonical normalised `student_name` + `parent_phone` WHERE `is_active = true` | Enforces the canonical student-matching rule at the database layer: no two active students may share the same normalised name + E.164 phone. Normalisation = case-fold + whitespace collapse + accent-stripping for comparison (stored form preserved); phone stored E.164 (`^\+[0-9]{7,15}$`). Deactivated records do not collide. |
+| Index | `parent_phone` (E.164-stored form) | Lookup by phone when finding a returning student. |
 | Index | `is_active` | Filter active students for selection lists. |
 
 ---
@@ -74,7 +74,14 @@ Stable student identity, separate from attendance sessions.
 
 | Column (addition) | Type | Null | Notes |
 |---|---|---|---|
-| `student_id` | uuid | YES | FK → `students.student_id`. Nullable: manual-entry sessions (unregistered students) have no student record. **Immutable once set**; identity corrections are a separate audited operation (attendance_identity_corrections), not a session update. |
+| `student_id` | uuid | YES | FK → `students.student_id`. Nullable: manual-entry sessions (unregistered students) have no student record. **Immutable once set.** |
+
+**Student identity correction rule:** A session's `student_id` may change **only** through a sanctioned, authorised and audited identity-correction operation — never through an ordinary profile edit, never through a direct `UPDATE sessions SET student_id = ...`, and never by mutating the original `events` rows.
+
+- **Original attendance events remain immutable:** `events.student_name`, `events.parent_phone`, and `events.student_id` (if present) are never changed after capture (BR-05/BR-07, AC-11.4).
+- **Sanctioned protected function:** The database projection update for an identity re-link must go through a protected, server-side sanctioned function (the same pattern as `sessions_apply_projection`/`sessions_apply_correction`, gated by the `app.session_mutation_authorized` GUC), never through direct SQL.
+- **Audit retains full history:** The `attendance_identity_corrections` table records `session_ref`, `previous_student_id` (NULL for manual-entry sessions), `new_student_id`, `reason`, `corrected_by` (actor), and `corrected_at` (timestamp).
+- **Ordinary profile edits never change historical attendance identity:** Editing `students.student_name` or `students.parent_phone` (via `student_audit`) is prospective only and does not re-point any `sessions.student_id` or alter any `events` row.
 
 Existing `sessions` columns from v1.0 §4 are unchanged (`session_ref`, `day_key`, `student_name`, `parent_phone`, `signed_in_at`, `signed_out_at`, `signed_in_by`, `signed_out_by`, `server_version`, `corrected`, `conflict_type`, `late_synced`, `needs_review`, `whatsapp_launched_at`, `created_at`, `updated_at`).
 
@@ -103,7 +110,7 @@ Indexes: `student_id`. Append-only triggers (no UPDATE/DELETE) per the v1.0 guar
 
 ## 6. Table: `attendance_identity_corrections` (proposed — new)
 
-Append-only audit of linking a historical session to a student record (distinct from profile edits and from time corrections).
+Append-only audit of linking/re-linking a historical session to a student record (distinct from profile edits and from time corrections). This table is the **audit record of the sanctioned identity-correction operation**; the actual `sessions.student_id` projection update must be performed through a protected server-side sanctioned function (gated by the `app.session_mutation_authorized` GUC), never through direct SQL.
 
 | Column | Type | Null | Default | Notes |
 |---|---|---|---|---|
@@ -112,10 +119,10 @@ Append-only audit of linking a historical session to a student record (distinct 
 | `previous_student_id` | uuid | YES | NULL | FK → `students.student_id`; NULL for manual-entry sessions. |
 | `new_student_id` | uuid | NO | — | FK → `students.student_id`. |
 | `reason` | text | YES | NULL | Staff reason for the re-link. |
-| `corrected_by` | text | NO | — | Staff name from active session. |
-| `corrected_at` | timestamptz | NO | `now()` | — |
+| `corrected_by` | text | NO | — | Staff name from active session (actor). |
+| `corrected_at` | timestamptz | NO | `now()` | Timestamp of the correction. |
 
-Indexes: `session_ref`, `new_student_id`. Append-only. This is **not** a mutation of `events`; historical events keep their original values (P3/P4 of the proposal).
+Indexes: `session_ref`, `new_student_id`. Append-only (no UPDATE/DELETE) per the v1.0 guardrail pattern. This is **not** a mutation of `events`; historical events keep their original values (P3/P4 of the proposal).
 
 ---
 
@@ -123,7 +130,7 @@ Indexes: `session_ref`, `new_student_id`. Append-only. This is **not** a mutatio
 
 `events` (§3 of v1.0), `sessions` (existing columns), `corrections`, `conflicts`, `login_attempts`, `app_settings`, the RLS/no-policies setting, the append-only triggers, the sessions mutability guardrail with sanctioned functions, the PD-D2 partial unique indexes, PD-D1 settings, and `health_privilege_check()` all carry forward unchanged.
 
-**Cross-contract consistency:** the new `student_id` wire field maps to `students.student_id`; API_CONTRACT_v1.1 §4 (events) gains an optional `studentId` on sign-in; API_CONTRACT_v1.1 adds endpoints R1–R7. Any schema change must update all three contracts.
+**Cross-contract consistency:** the new `student_id` wire field maps to `students.student_id`; API_CONTRACT_v1.1 §4 (events) gains an optional `studentId` on sign-in; API_CONTRACT_v1.1 adds endpoints R1–R7. Any schema change must update all three contracts. The canonical student-matching rule (case-fold + whitespace collapse + accent-stripping for comparison; E.164 phone) is enforced server-side and by the database partial unique index — frontend duplicate checks are advisory only and must never be the sole enforcement.
 
 ---
 

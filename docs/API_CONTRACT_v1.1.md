@@ -51,6 +51,10 @@ Explicitly not endpoints (pilot): CSV export (client-side), search (client-side)
 
 All registry endpoints are cookie-authenticated; the browser holds no database key (S2/S3 preserved). Registry mutations (R1, R4, R5, R6) are online-only (consistent with AD-5/Q13 — no offline student-registry writes in the pilot). R2/R3/R7 are read queries.
 
+**Canonical matching enforcement (Change 2):** R1 duplicate checks are enforced server-side and by the database partial unique index on canonical normalised `student_name` + `parent_phone` (where `is_active = true`) — frontend duplicate checks are advisory only and must never be the sole enforcement. The canonical rule = case-fold + whitespace collapse + accent-stripping for name comparison (stored form preserved) + E.164 phone.
+
+**Identity correction via sanctioned function (Change 1):** R6 performs the session-to-student re-link through a protected server-side sanctioned function (gated by the `app.session_mutation_authorized` GUC), never through direct SQL; it writes an append-only `attendance_identity_corrections` audit row retaining previous/new student IDs, actor, timestamp and reason.
+
 **Proposed decision (pending):** exact request/response payload shapes for R1–R7 are proposed implementation decisions, not approved stakeholder decisions.
 
 ---

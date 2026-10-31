@@ -87,14 +87,13 @@ From Deliverable A §8.2. These must be resolved before the student registry or 
 
 | ID | Defect | Fix location | Acceptance criterion |
 |---|---|---|---|
-| D1 | Losing conflicting sign-out events dropped on partial-unique-index violation (FR-16/BR-12) | `src/app/api/events/route.ts` + migration sanctioned paths | Second sign-out for a session: losing event persisted with `conflict_marker='losing'`, a `conflicts` row written, session flagged; both events retrievable after resolution |
+| D1/D8 | Conflict engine: losing conflicting sign-out events dropped on partial-unique-index violation; ingest route lacks conflict/flag engine (needs_review, late_synced, consistency flags, PD-D3 orphaned sign-out) (FR-16/BR-12/PD-D3) | `src/app/api/events/route.ts` + migration sanctioned paths | One coherent conflict-engine task (see Phase 0) with separate acceptance criteria: both competing events preserved; losing-event markers + conflict audit rows recorded; PD-D3 orphaned sign-outs accepted into log + provisional session + `needs_review`; provisional sessions reconciled when sign-in arrives; review/consistency flags set; retry/interrupted-sync recovery safe |
 | D2 | UI chip says "✓ Sent" for WhatsApp (BR-13/Q15) | `src/app/dashboard/AttendanceDashboard.tsx:827` | Chip reads "WhatsApp opened"; nowhere claims "sent"/"delivered" |
 | D3 | `/api/sign-out` uses server clock (FR-07/FR-11) | `src/app/api/sign-out/route.ts` — reconcile with `/api/events` device-time path or remove | Sign-out time of record is device-captured; no server-clock sign-out path |
 | D4 | Unsigned localStorage session (FR-04/T-C2/S11) | `src/lib/attendance-store.ts`, `src/lib/session.ts`, `/api/login` | Signed descriptor (Ed25519/ES256, `{staffName, iat, exp, keyId, nonce}`) verifiable offline; no PIN material stored |
 | D5 | No login rate limiting (FR-03/S4) | `src/app/api/login/route.ts` + `login_attempts` | 5 wrong attempts → 5-minute lockout, counted client and server, visible wait message |
 | D6 | Dataset mismatch clears pending unsynchronised records (FR-14/FR-35/BR-17) | `src/lib/attendance-store.ts` `clearAttendanceForDataset` | Unsynchronised events never cleared; clear scoped to acknowledged data or blocked while unacknowledged events exist |
 | D7 | Missing contracted endpoints E5/E6/E7 | New routes `/api/corrections`, `/api/day-close/check`, `/api/time` | Endpoints behave per API_CONTRACT_v1.1 |
-| D8 | Ingest route lacks conflict/flag engine (needs_review, late_synced, consistency flags, PD-D3 orphaned sign-out) | `src/app/api/events/route.ts` | Orphaned sign-out accepted into log + provisional session + `needs_review`; late events attached to original day + flagged; consistency flags set |
 | D9 | Local durability guarantees not met (AC-G3b/BR-21/AD-6) | `src/lib/attendance-store.ts` | Read-back verify before success UI; `navigator.storage.persist()`; low-storage warning; blocking-error state on storage failure |
 
 ---
@@ -105,15 +104,23 @@ The phases below are the recommended sequence. Each phase states: objective, tas
 
 ### Phase 0 — Secure the evidence core (data-integrity defect fixes)
 
-**Objective:** Bring the implemented system into compliance with its own integrity contract before adding anything new. Fix D1–D9.
+**Objective:** Bring the implemented system into compliance with its own integrity contract before adding anything new. Fix D1/D8–D9.
+
+**Immediate priority within Phase 0:** **D6** (dataset mismatch must never clear unsynchronised attendance records) is treated as an immediate, non-deferrable task within Phase 0 — it must be completed before any other Phase 0 task that touches local storage, because a dataset mismatch clear can destroy the only copy of unsynchronised events.
 
 **Tasks:**
-- D1: Persist losing conflict events + `conflicts` rows; orphaned-sign-out (PD-D3) provisional session + `needs_review`; consistency flags in `/api/events`.
+- **Conflict engine (D1/D8):** One coherent task in `/api/events` ingest path with separate acceptance criteria:
+  - Preserve both competing events: losing event persisted with `conflict_marker='losing'`, a `conflicts` row written, session flagged; both events retrievable after resolution.
+  - Record losing-event markers and conflict audit rows: conflict record links winning/losing event IDs; resolution via audited correction references the conflict.
+  - Handle PD-D3 orphaned sign-outs: a sign-out arriving before its sign-in is accepted into the log, a provisional session created with `needs_review=true`, and re-projected/merged when the sign-in arrives.
+  - Reconcile provisional sessions when sign-in arrives: the sign-out is re-projected onto the real session; the provisional state is cleared.
+  - Set review and consistency flags: `needs_review`, `late_synced`, ahead-of-receipt (> Q5 tolerance), sign-out-before-sign-in, day-key mismatch, device-sequence regression — all set on the projection.
+  - Retry and interrupted-sync recovery: in-flight entries reset to `pending` on app load/foreground; idempotent resubmission via `eventId` yields exactly one server record; no duplicate or lost events.
 - D2: Change "✓ Sent" → "WhatsApp opened" across dashboard, day review, CSV; align WhatsApp message template with FR-25 (add privacy sentence FR-28).
 - D3: Reconcile or remove `/api/sign-out` server-clock path; sign-out time of record must be device-captured via `/api/events`.
 - D4: Implement signed session descriptor (Ed25519 primary, ES256 fallback per AD-1/U1) issued at login, verified offline in-browser, no PIN material stored; session-expired screen rendering no data.
 - D5: Add server-side + client login rate limiting (5 attempts → 5-minute lockout, `login_attempts`, `429` + `Retry-After`).
-- D6: Scope dataset-mismatch clear to acknowledged data; block clear while unacknowledged events exist.
+- **D6 (immediate):** Scope dataset-mismatch clear to acknowledged data; block clear while unacknowledged events exist. **Unsynchronised events must never be cleared.**
 - D7: Stand up `/api/time` (E7) probe endpoint.
 - D9: Add IndexedDB read-back verify, `navigator.storage.persist()`, low-storage warning, blocking-error durability state.
 
@@ -125,13 +132,14 @@ The phases below are the recommended sequence. Each phase states: objective, tas
 - AC-G5 fast/slow clock behaviour (once E7 probe exists; probe values per Q5 defaults).
 - AC-15.x acceptance-window rejection visible, never silent.
 - WhatsApp wording audit: zero occurrences of "sent"/"delivered"; "WhatsApp opened" everywhere.
-- `npm run test` green (add regression tests for D1–D9); `npm run typecheck` and `npm run build` clean.
+- D6 drill: dataset-mismatch clear with unacknowledged events present is blocked; unsynchronised events survive; clear scoped to acknowledged data only.
+- `npm run test` green (add regression tests for D1/D8–D9); `npm run typecheck` and `npm run build` clean.
 
-**Tests required:** New unit tests for events-route conflict preservation, rate limiting, descriptor sign/verify, dataset-clear scoping, durability failure. DB-integration tests (currently skipped) enabled once a non-production Postgres/Supabase is available (T1.2 review report blocker 1–2).
+**Tests required:** New unit tests for events-route conflict engine (all six acceptance criteria above), rate limiting, descriptor sign/verify, dataset-clear scoping (D6), durability failure (D9). DB-integration tests (currently skipped) enabled once a non-production Postgres/Supabase is available (T1.2 review report blocker 1–2).
 
-**Relevant files/components:** `src/app/api/events/route.ts`, `src/app/api/login/route.ts`, `src/app/api/time/route.ts` (new), `src/app/api/sign-out/route.ts`, `src/app/dashboard/AttendanceDashboard.tsx`, `src/lib/session.ts`, `src/lib/attendance-store.ts`, `src/lib/phone.ts`, `src/lib/whatsapp.ts`, `supabase/migrations/...` (no new migration needed for D1–D9 except possibly sanctioned RPC additions — none required; D1 uses existing `sessions_flag_conflict` and `conflicts` table).
+**Relevant files/components:** `src/app/api/events/route.ts`, `src/app/api/login/route.ts`, `src/app/api/time/route.ts` (new), `src/app/api/sign-out/route.ts`, `src/app/dashboard/AttendanceDashboard.tsx`, `src/lib/session.ts`, `src/lib/attendance-store.ts`, `src/lib/phone.ts`, `src/lib/whatsapp.ts`, `supabase/migrations/...` (no new migration needed for D1/D8–D9 except possibly sanctioned RPC additions — none required; D1/D8 uses existing `sessions_flag_conflict` and `conflicts` table).
 
-**Critical blocker:** None. D1–D9 are safe to implement under any outcome of Q5/Q13–Q16/SR-*.
+**Critical blocker:** None. D1/D8–D9 are safe to implement under any outcome of Q5/Q13–Q16/SR-*.
 
 ---
 
@@ -164,6 +172,8 @@ The phases below are the recommended sequence. Each phase states: objective, tas
 
 **Objective:** Introduce the permanent student registry as a separate concept from attendance sessions, per `docs/STUDENT_REGISTRY_PROPOSAL_v1.0.md`. No student-entry UI is built in this phase (workflow approved separately).
 
+**Registry approval gate (enforced):** SR-1 through SR-8 must receive **explicit owner approval** before any Phase 2 schema migration or registry API (R1–R7) implementation begins. Until approval is recorded, SR-1…SR-8 remain proposed safe defaults only; no `students` table, no `student_id` FK, and no registry endpoints may be implemented. Phase 0 and Phase 1 may proceed independently of this gate.
+
 **Tasks:**
 - Add migration: `students` table (SR-1/PD-D12: `student_id` PK, name, parent phone, active flag, timestamps; name+phone unique among active), `student_audit`, `attendance_identity_corrections`; nullable `student_id` FK on `sessions` (PD-D13); optional `student_id` on sign-in `events` (PD-D14 — proposed).
 - Add RLS/no policies, append-only guards on the two new audit tables.
@@ -172,20 +182,20 @@ The phases below are the recommended sequence. Each phase states: objective, tas
 - Migration strategy: **no automatic backfill** of historical sessions; staff-confirmed linking only (SR-3).
 - Tests: unit tests for uniqueness, duplicate detection, deactivation, audit rows, identity-correction audit; migration-content tests; DB-integration tests once a live DB is available.
 
-**Dependencies:** Phase 0 (integrity core must be stable); API_CONTRACT_v1.1 / DATABASE_CONTRACT_v1.1. Q5 not required. SR-1…SR-8 are proposed defaults — implementation proceeds under them but they remain pending stakeholder approval.
+**Dependencies:** Phase 0 (integrity core must be stable); API_CONTRACT_v1.1 / DATABASE_CONTRACT_v1.1; **SR-1…SR-8 owner approval** (gate). Q5 not required.
 
 **Acceptance criteria:**
 - A registered student has a stable `student_id`; name/phone edits do not change `student_id` and do not alter historical sessions/events.
 - Manual entry (`student_id = NULL`) still works offline and online; an unregistered student is never blocked.
 - Duplicate registration (same normalised name+phone active) is detected and not auto-created.
 - Deactivation excludes a student from selection but preserves all historical sessions.
-- Identity correction (linking a historical session to a student) writes an audit row (who/when/why/original link).
+- Identity correction (linking a historical session to a student) writes an audit row (who/when/why/original link) via a sanctioned protected database function.
 - All registry endpoints require a valid session cookie; browser holds no database key.
 - Tests pass; migration applies cleanly on a fresh non-production database.
 
 **Relevant files/components:** New migration file (not to be applied to production), `src/app/api/students/route.ts` (new), `src/app/api/students/[studentId]/route.ts` (new), `src/app/api/students/[studentId]/deactivate/route.ts` (new), `src/app/api/attendance-identity-corrections/route.ts` (new), `src/app/api/students/[studentId]/attendance/route.ts` (new), `src/app/api/events/route.ts` (optional `studentId`), `supabase/migrations/...`.
 
-**Critical blocker:** SR-4 (whether gate sign-in offers student selection at capture) is deferred — Phase 2 builds registry + APIs only; no UI, no offline registry cache.
+**Critical blocker:** SR-1…SR-8 owner approval required before any Phase 2 schema or API work. SR-4 (whether gate sign-in offers student selection at capture) is additionally deferred — Phase 2 builds registry + APIs only; no UI, no offline registry cache.
 
 ---
 
@@ -193,25 +203,27 @@ The phases below are the recommended sequence. Each phase states: objective, tas
 
 **Objective:** Wire the student registry into the gate flow and complete attendance administration (editing + corrections + day close) end to end.
 
+**Capture-workflow approval gate (enforced):** The student-selection UI at sign-in (SR-4) remains **blocked** until the capture workflow — how a returning student is found, selected, and their saved details retrieved — is explicitly approved by the owner. Until approval, manual entry remains the only gate path; no student-selection UI may be built. Profile-edit and time-correction administration may proceed once Phase 1 and Phase 2 are complete, as they do not depend on SR-4.
+
 **Tasks:**
-- (Post UI-approval only) Student selection at sign-in: find/returning-student selection with automatic retrieval of saved name/phone; manual entry fallback always available.
+- (Post UI-approval only) Student selection at sign-in: find/returning-student selection with automatic retrieval of saved name/phone; manual entry fallback always available. **Blocked until SR-4 capture workflow explicitly approved.**
 - Student profile edit UI (name/phone, deactivate/reactivate) with audit display — separate from time-correction mode.
 - Attendance-correction UI (time corrections) connected to E5, with conflict-flag display and resolution (AD-4: "use first recorded time / use later event's time").
 - Day-review screen enhancements: conflict flags, correction status, student identity, late-synced flags, outstanding-message status.
 - End-of-day drill: close day (E6) after full sync; outstanding messages = 0; CSV export with honest wording.
 
-**Dependencies:** Phase 2 (registry + APIs); Phase 1 (E5/E6 endpoints); SR-4 approval for selection UI.
+**Dependencies:** Phase 2 (registry + APIs, subject to SR-1…SR-8 gate); Phase 1 (E5/E6 endpoints); **SR-4 capture-workflow approval for selection UI only**.
 
 **Acceptance criteria:**
-- Returning student selected at sign-in auto-fills name/phone; new student can still be entered manually.
+- Returning student selected at sign-in auto-fills name/phone; new student can still be entered manually. **Only testable after SR-4 approval.**
 - Profile edits are audited; historical attendance unchanged.
 - Time corrections audited; corrected time used in parent message; conflicts flagged, not silently merged.
 - Day close succeeds only when online + fully synced; unsynchronised events never purged.
-- End-to-end weekly cycle: Week 1 → Week 2 with returning student selection works on real phones.
+- End-to-end weekly cycle: Week 1 → Week 2 with returning student selection works on real phones. **Only testable after SR-4 approval.**
 
 **Relevant files/components:** `src/app/dashboard/AttendanceDashboard.tsx` (selection, edit modes, close-day), `src/app/review/DayReview.tsx` (flags), new registry UI components (post-approval only).
 
-**Critical blocker:** SR-4 (selection UI workflow) — not approved; do not build. Manual entry remains the only gate path until approved.
+**Critical blocker:** SR-4 (selection UI workflow) — not approved; do not build. Manual entry remains the only gate path until the capture workflow is explicitly approved.
 
 ---
 

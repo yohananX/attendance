@@ -50,7 +50,7 @@ A student has a **stable identity across multiple attendance dates**. Each lesso
 
 | # | Principle | Rationale |
 |---|---|---|
-| P1 | **Do not identify students by name alone.** Names are not unique and are mistyped. Matching must use name + parent phone (normalised) plus explicit staff confirmation where needed. | Prevents wrong-student attribution. |
+| P1 | **Do not identify students by name alone.** Names are not unique and are mistyped. Matching uses the **canonical student-matching rule**: normalised `student_name` + normalised `parent_phone`, compared server-side and enforced by the database uniqueness constraint. Normalisation = Unicode case-fold, collapse internal/leading/trailing whitespace, strip accents/diacritics for comparison only (stored form preserved), and phone normalised to E.164 (`^\+[0-9]{7,15}$` per FR-06/BR-10). Duplicate checks are enforced server-side and at the database layer — never frontend-only. Explicit staff confirmation is required before any match is acted on. | Prevents wrong-student attribution. |
 | P2 | **Do not automatically merge historical records merely because names match.** Reconciliation requires reliable matching and explicit, audited authorisation. | Preserves existing attendance evidence. |
 | P3 | **Preserve existing attendance events and their original values.** Student profile changes never mutate `events` rows. | The event log is append-only (BR-05/BR-07, AC-11.4). |
 | P4 | **Editing a permanent student profile must not silently rewrite historical attendance.** Edits change the registry row; historical sessions keep the name/phone captured at the time. | Separates current contact data from historical evidence. |
@@ -85,11 +85,13 @@ A new table `students` is added to the server schema. It is **separate** from `s
 | Kind | Definition | Purpose |
 |---|---|---|
 | PK | `student_id` | Stable identity (P6). |
-| Unique | `LOWER(student_name)`, `parent_phone` **where `is_active = true`** | Prevents two *active* students with the same normalised name+phone. Supports P1/P9. Partial index so deactivated/reactivated records do not collide with historical ones. |
-| Index | `parent_phone` | Lookup by phone when searching for a returning student. |
+| Partial unique | Canonical normalised `student_name` + `parent_phone` **where `is_active = true`** | Enforces the canonical student-matching rule (P1) at the database layer: no two active students may share the same normalised name + E.164 phone. Partial index so deactivated/reactivated records do not collide with historical ones. |
+| Index | `parent_phone` (E.164-stored form) | Lookup by phone when searching for a returning student. |
 | Index | `is_active` | Filter active students for selection lists. |
 
-> **Proposed decision (new, pending owner approval):** the exact uniqueness surface (name+phone combined vs phone-only) and normalisation (case, spacing, accents) for the student registry must be confirmed. PD-A5 (name+phone+dayKey for competing sign-in) applies to *sessions*, not to the student registry; the registry needs its own matching rule. Do not treat PD-A5 as approved for the registry.
+> **Canonical matching rule (server + database enforced):** normalise `student_name` via Unicode case-fold + whitespace collapse + accent-stripping for comparison (stored form preserved); normalise `parent_phone` to E.164 (`^\+[0-9]{7,15}$` per FR-06/BR-10). The partial unique index enforces this exact rule server-side. Frontend duplicate checks are advisory only and must never be the sole enforcement.
+>
+> **Proposed decision (new, pending owner approval):** the exact uniqueness surface (name+phone combined vs phone-only) and the accent-handling mechanism for the comparison (e.g. PostgreSQL `unaccent` extension vs plain `LOWER`) must be confirmed. PD-A5 (name+phone+dayKey for competing sign-in) applies to *sessions*, not to the student registry; the registry needs its own matching rule (SR-1). Do not treat PD-A5 as approved for the registry.
 
 ### 3.3 Student profile audit table (proposed)
 
@@ -127,7 +129,14 @@ The existing `sessions` projection gains a nullable foreign key:
 
 | Column (proposed addition to `sessions`) | Type | Null | Notes |
 |---|---|---|---|
-| `student_id` | uuid | YES | FK → `students.student_id`. Nullable because manual-entry sessions (unregistered students) have no student record yet. Immutable once set (identity corrections are a separate, audited operation — P5). |
+| `student_id` | uuid | YES | FK → `students.student_id`. Nullable because manual-entry sessions (unregistered students) have no student record yet. **Immutable once set.** |
+
+**Student identity correction rule (P5):** A session's student identity may change **only** through a sanctioned, authorised and audited identity-correction operation — never through an ordinary profile edit, never directly on the `sessions` table, and never by mutating the original `events` rows.
+
+- **Original attendance events remain immutable** (BR-05/BR-07, AC-11.4): `events.student_name`, `events.parent_phone`, and `events.student_id` (if present) are never changed after capture.
+- **Sanctioned protected function:** The database projection update for an identity re-link must go through a protected, server-side function (the same sanctioned-path pattern as `sessions_apply_projection`/`sessions_apply_correction`), never through a direct `UPDATE sessions SET student_id = ...`.
+- **Audit retains full history:** The `attendance_identity_corrections` table records `session_ref`, `previous_student_id` (NULL for manual-entry sessions), `new_student_id`, `reason`, `corrected_by` (actor), and `corrected_at` (timestamp).
+- **Ordinary profile edits never change historical attendance identity:** Editing a student's `student_name` or `parent_phone` (via `student_audit`) is prospective only and does not re-point any `sessions.student_id` or alter any `events` row.
 
 The existing `events` table carries `student_name` and `parent_phone` on the sign-in event (already the case) so the projection is rebuildable from the log. Optionally, `events` may also carry `student_id` on the sign-in event for full traceability; this is **proposed** and does not change the append-only contract.
 
@@ -169,14 +178,14 @@ Existing attendance data (sessions and events captured before the registry) has 
 
 Migration is **opt-in and conservative**: historical sessions are **not** automatically linked to students. Linking happens only where matching is reliable and explicitly authorised.
 
-Proposed matching rule for candidate linking:
-- Normalise the historical session's `student_name` and `parent_phone`.
+Proposed matching rule for candidate linking (uses the canonical student-matching rule, P1):
+- Normalise the historical session's `student_name` and `parent_phone` using the canonical rule (case-fold + whitespace collapse + accent-stripping for comparison; phone E.164).
 - Look up active `students` with matching normalised name + phone.
 - **Exactly one** candidate → propose a link for staff confirmation (authorised identity correction, audit recorded).
 - **Zero** candidates → leave `student_id = NULL` (manual-entry session; no change).
 - **Multiple** candidates (possible duplicate) → do **not** link automatically; flag for manual review (P2, P9).
 
-**Proposed decision (pending):** the normalisation and tolerance for matching (case-insensitive, accent-insensitive, phone already E.164-normalised by FR-06) must be confirmed before any migration script is written. Fuzzy matching (e.g. "Chidi" vs "Chidiebere") is **not** recommended for automatic linking — too high a risk of wrong-student attribution under P1/P2.
+**Proposed decision (pending):** the accent-handling mechanism for the comparison (e.g. PostgreSQL `unaccent` extension vs plain `LOWER`) and any matching tolerance must be confirmed before any migration script is written. Fuzzy matching (e.g. "Chidi" vs "Chidiebere") is **not** recommended for automatic linking — too high a risk of wrong-student attribution under P1/P2.
 
 ### 6.2 What migration must not do
 
@@ -200,10 +209,10 @@ Linking a historical session to a student record is an **attendance identity cor
 
 ### 7.1 Duplicate registration at creation
 
-When registering a new student:
-1. Normalise name + parent phone.
-2. Query active students for an exact normalised match.
-3. Match found → **do not create a duplicate.** Flag as "possible existing student" and offer to select the existing record (warn-don't-block, staff confirms).
+When registering a new student (server-side, endpoint R1):
+1. Normalise name + parent phone using the canonical student-matching rule (P1).
+2. Query active students for an exact normalised match (server-side + database unique constraint enforcement — never frontend-only).
+3. Match found → **do not create a duplicate.** Flag as "possible existing student" and offer to select the existing record (warn-don't-block, staff confirms via explicit action).
 4. No match → create the `students` row.
 
 ### 7.2 Duplicate or potentially matching existing records
@@ -238,9 +247,9 @@ Student profile editing (name, parent phone, deactivate/reactivate) is distinct 
 ### 8.2 What profile editing must NOT do
 
 - Must not change `student_id` (P6).
-- Must not update historical `sessions.student_name`/`parent_phone` or any `events` row (P3/P4).
+- Must **never** update historical `sessions.student_id`, `sessions.student_name`, `sessions.parent_phone`, or any `events` row (P3/P4). Profile edits are prospective only: they change the current registry row; historical sessions keep the identity and name/phone captured at the time.
 - Must not cascade-deactivate or delete sessions (BR-07).
-- Must not auto-link or unlink sessions (P5).
+- Must not auto-link or unlink sessions (P5). Any re-link of a historical session to a student is an identity correction (§5.1), not a profile edit.
 
 ### 8.3 Authorisation model (shared-PIN constraint)
 
@@ -321,6 +330,8 @@ Corresponding request/response shapes follow the API_CONTRACT_v1.0 conventions (
 - **No real-phone or production tests** are part of this proposal; the registry is a design artifact at this stage.
 
 ### 13.2 Migration strategy (proposed, not to be applied yet)
+
+**Registry approval gate:** SR-1 through SR-8 must receive **explicit owner approval** before any Phase 2 schema migration or registry API implementation begins. Until approval is recorded, no `students` table, no `student_id` FK, and no registry endpoints may be implemented. This gate is independent of Phase 0 and Phase 1, which may proceed without it.
 
 1. Add the `students`, `student_audit`, and `attendance_identity_corrections` tables in a new migration, with RLS/no policies and append-only guards.
 2. Add nullable `student_id` FK to `sessions` (and optionally `student_id` to `events` sign-in rows).

@@ -680,22 +680,16 @@ h3 {
 .student-details {
   min-width: 0;
   flex: 1 1 auto;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.student-line-2 {
+  display: flex;
+  justify-content: space-between;
   align-items: center;
-  gap: 2px 12px;
-}
-
-.student-identity {
-  min-width: 0;
-  display: grid;
-  gap: 1px;
-}
-
-.student-divider {
-  color: var(--ink-faint);
-  font-size: 12px;
-  margin: 0 2px;
+  width: 100%;
 }
 
 .student-name {
@@ -711,17 +705,21 @@ h3 {
 .student-phone {
   color: var(--ink-soft);
   font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
 }
 
 .student-time {
-  grid-column: 2;
-  grid-row: 1 / span 2;
   color: var(--ink-strong);
   font-size: 16px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
-  text-align: right;
   white-space: nowrap;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .student-time--range {
@@ -730,6 +728,8 @@ h3 {
 
 .sync-label {
   font-size: 11px;
+  margin-left: auto;
+  white-space: nowrap;
 }
 
 .sync-label--synced {

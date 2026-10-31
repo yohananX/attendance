@@ -758,8 +758,8 @@ export default function AttendanceDashboard({ schoolName }: { schoolName: string
                 return (
                   <li className="student-card" key={record.sessionRef}>
                     <div className="student-details">
-                      <div className="student-identity">
-                        <strong className="student-name">{record.studentName}</strong>
+                      <strong className="student-name">{record.studentName}</strong>
+                      <div className="student-line-2">
                         <span className="student-phone">{record.parentPhone}</span>
                         <span className={sync.className}>{sync.label}</span>
                       </div>
@@ -812,9 +812,8 @@ export default function AttendanceDashboard({ schoolName }: { schoolName: string
                 return (
                   <li className="student-card student-card--completed" key={record.sessionRef}>
                     <div className="student-details">
-                      <div className="student-identity">
-                        <strong className="student-name">{record.studentName}</strong>
-                        <span className="student-divider">•</span>
+                      <strong className="student-name">{record.studentName}</strong>
+                      <div className="student-line-2">
                         <span className="student-phone">{record.parentPhone}</span>
                         <span className={sync.className}>{sync.label}</span>
                       </div>

@@ -19,6 +19,7 @@ import {
   signSession,
   sessionCookieAttributes,
 } from "@/lib/session";
+import { getAttendanceDatasetId } from "@/lib/attendance-dataset";
 
 export async function POST(req: Request) {
   const serverTime = new Date().toISOString();
@@ -63,6 +64,11 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "invalid_pin", serverTime }, { status: 401 });
   }
 
+  const datasetId = getAttendanceDatasetId();
+  if (!datasetId) {
+    return NextResponse.json({ error: "dataset_not_configured", serverTime }, { status: 503 });
+  }
+
   let token: string;
   try {
     token = signSession(staffName.trim());
@@ -73,7 +79,7 @@ export async function POST(req: Request) {
   const sessionExpiresAt = Date.now() + 12 * 60 * 60 * 1000;
 
   return NextResponse.json(
-    { staffName: staffName.trim(), expiresAt: sessionExpiresAt, serverTime },
+    { staffName: staffName.trim(), expiresAt: sessionExpiresAt, datasetId, serverTime },
     { status: 200, headers: { "set-cookie": cookie, "cache-control": "no-store" } },
   );
 }

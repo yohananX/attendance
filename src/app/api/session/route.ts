@@ -10,6 +10,7 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 
 import { getCookie, SESSION_COOKIE_NAME, validateSessionToken } from "@/lib/session";
+import { getAttendanceDatasetId } from "@/lib/attendance-dataset";
 
 export async function GET(req: Request) {
   const serverTime = new Date().toISOString();
@@ -18,8 +19,12 @@ export async function GET(req: Request) {
   if (!session) {
     return NextResponse.json({ error: "unauthenticated", serverTime }, { status: 401 });
   }
+  const datasetId = getAttendanceDatasetId();
+  if (!datasetId) {
+    return NextResponse.json({ error: "dataset_not_configured", serverTime }, { status: 503 });
+  }
   return NextResponse.json(
-    { staffName: session.staffName, expiresAt: session.expiresAt, serverTime },
+    { staffName: session.staffName, expiresAt: session.expiresAt, datasetId, serverTime },
     { status: 200, headers: { "cache-control": "no-store" } },
   );
 }

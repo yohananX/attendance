@@ -11,6 +11,7 @@ beforeEach(() => {
   process.env = { ...originalEnv, NODE_ENV: "production" };
   process.env.STAFF_PIN = "123456";
   process.env.SESSION_SECRET = "test-session-secret";
+  process.env.ATTENDANCE_DATASET_ID = "test-dataset";
 });
 
 afterEach(() => {
@@ -57,6 +58,7 @@ describe("POST /api/login", () => {
 
     expect(response.status).toBe(200);
     expect(body.staffName).toBe("Grace");
+    expect(body.datasetId).toBe("test-dataset");
     expect(body.expiresAt).toBeGreaterThan(Date.now());
     expect(setCookie).toContain(`${SESSION_COOKIE_NAME}=`);
     expect(setCookie).toContain("HttpOnly");
@@ -73,5 +75,13 @@ describe("POST /api/login", () => {
     const response = await POST(request(validBody));
     expect(response.status).toBe(503);
     expect(response.headers.get("set-cookie")).toBeNull();
+  });
+
+  it("fails closed when the production dataset identity is missing", async () => {
+    delete process.env.ATTENDANCE_DATASET_ID;
+    const response = await POST(request(validBody));
+    expect(response.status).toBe(503);
+    expect(response.headers.get("set-cookie")).toBeNull();
+    expect(await response.json()).toMatchObject({ error: "dataset_not_configured" });
   });
 });

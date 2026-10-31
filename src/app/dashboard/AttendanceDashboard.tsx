@@ -7,10 +7,13 @@ import {
   AttendanceEvent,
   AttendanceRecord,
   clearCachedStaffSession,
+  clearAttendanceForDataset,
   getAttendanceForDay,
   getCachedStaffSession,
   getDeviceId,
+  getStoredAttendanceDatasetId,
   getPendingEvents,
+  matchAttendanceDataset,
   mergeServerAttendance,
   retryFailedEvents,
   saveCachedStaffSession,
@@ -23,6 +26,7 @@ import { normalizePhone } from "@/lib/phone";
 import { buildSignInMessage, buildSignOutMessage, buildWhatsAppUrl } from "@/lib/whatsapp";
 
 interface ServerDay {
+  datasetId: string;
   dayKey: string;
   sessions: Omit<AttendanceRecord, "pendingEvents" | "syncError">[];
 }
@@ -71,17 +75,23 @@ export default function AttendanceDashboard({ schoolName }: { schoolName: string
   const router = useRouter();
   const nameInput = useRef<HTMLInputElement>(null);
   const syncingRef = useRef(false);
+  const datasetIdRef = useRef<string | null>(null);
+  const datasetResetRequiredRef = useRef(false);
   const [dayKey] = useState(currentLagosDay);
   const [records, setRecords] = useState<AttendanceRecord[]>([]);
   const [staff, setStaff] = useState<LoginSession | null>(null);
   const [ready, setReady] = useState(false);
   const [redirecting, setRedirecting] = useState(false);
+  const [datasetResetRequired, setDatasetResetRequired] = useState(false);
+  const [datasetVerified, setDatasetVerified] = useState(false);
+  const [clearingDataset, setClearingDataset] = useState(false);
   const [online, setOnline] = useState(true);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [studentName, setStudentName] = useState("");
   const [parentPhone, setParentPhone] = useState("");
   const [search, setSearch] = useState("");
+  const [activeTab, setActiveTab] = useState<"in-school" | "signed-out">("in-school");
   const [formError, setFormError] = useState("");
   const [notice, setNotice] = useState("");
   const [pageError, setPageError] = useState("");
@@ -145,13 +155,27 @@ export default function AttendanceDashboard({ schoolName }: { schoolName: string
       throw new Error("Could not refresh attendance from the server.");
     }
     const data = (await response.json()) as ServerDay;
+    if (typeof data.datasetId !== "string" || !data.datasetId) {
+      throw new Error("The server did not identify this attendance dataset.");
+    }
+    datasetIdRef.current = data.datasetId;
+    const datasetMatches = await matchAttendanceDataset(data.datasetId);
+    datasetResetRequiredRef.current = !datasetMatches;
+    setDatasetResetRequired(!datasetMatches);
+    setDatasetVerified(datasetMatches);
+    if (!datasetMatches) {
+      setRecords([]);
+      return false;
+    }
     const merged = await mergeServerAttendance(dayKey, data.sessions);
     setRecords(merged);
     return true;
   }, [dayKey, router]);
 
   const syncPending = useCallback(async () => {
-    if (!navigator.onLine || syncingRef.current) return;
+    if (!navigator.onLine || syncingRef.current || datasetResetRequiredRef.current) return;
+    const datasetId = datasetIdRef.current;
+    if (!datasetId) return;
     syncingRef.current = true;
     setSyncing(true);
     setPageError("");
@@ -162,7 +186,7 @@ export default function AttendanceDashboard({ schoolName }: { schoolName: string
           method: "POST",
           headers: { "Content-Type": "application/json" },
           credentials: "include",
-          body: JSON.stringify({ events: [event] }),
+          body: JSON.stringify({ datasetId, events: [event] }),
         });
         if (response.status === 401) {
           clearCachedStaffSession();
@@ -170,6 +194,17 @@ export default function AttendanceDashboard({ schoolName }: { schoolName: string
           return;
         }
         if (!response.ok) {
+          if (response.status === 409) {
+            const body = await response.json() as { error?: string; datasetId?: string };
+            if (body.error === "dataset_mismatch" && body.datasetId) {
+              datasetIdRef.current = body.datasetId;
+              datasetResetRequiredRef.current = true;
+              setDatasetResetRequired(true);
+              setRecords([]);
+              setPageError("This device has attendance from a different database. Clear old device data to continue.");
+              return;
+            }
+          }
           throw new Error("Could not sync attendance. Your saved records are still on this phone.");
         }
         const body = await response.json() as {
@@ -188,7 +223,11 @@ export default function AttendanceDashboard({ schoolName }: { schoolName: string
             : "The server did not accept this record."),
         );
       }
-      await refreshLocal();
+      if (datasetIdRef.current && !datasetResetRequiredRef.current) {
+        await refreshLocal();
+      } else {
+        setRecords([]);
+      }
       await refreshFromServer();
     } catch (error) {
       setPageError(error instanceof Error ? error.message : "Sync failed. Records remain saved on this phone.");
@@ -216,6 +255,9 @@ export default function AttendanceDashboard({ schoolName }: { schoolName: string
     async function initialise() {
       try {
         const cached = getCachedStaffSession();
+        const storedDatasetId = getStoredAttendanceDatasetId();
+        datasetIdRef.current = storedDatasetId;
+        if (storedDatasetId) setDatasetVerified(true);
         if (navigator.onLine) {
           try {
             const response = await fetch("/api/session", {
@@ -230,7 +272,20 @@ export default function AttendanceDashboard({ schoolName }: { schoolName: string
             if (!response.ok) {
               throw new Error("Could not check the staff session.");
             }
-            const data = await response.json() as { staffName: string; expiresAt?: number };
+            const data = await response.json() as {
+              staffName: string;
+              expiresAt?: number;
+              datasetId?: string;
+            };
+            if (typeof data.datasetId !== "string" || !data.datasetId) {
+              throw new Error("The server did not identify this attendance dataset.");
+            }
+            datasetIdRef.current = data.datasetId;
+            const datasetMatches = await matchAttendanceDataset(data.datasetId);
+            datasetResetRequiredRef.current = !datasetMatches;
+            setDatasetResetRequired(!datasetMatches);
+            setDatasetVerified(datasetMatches);
+            if (!datasetMatches) setRecords([]);
             const session = cached?.staffName === data.staffName
               ? cached
               : saveCachedStaffSession(data.staffName, data.expiresAt);
@@ -252,8 +307,7 @@ export default function AttendanceDashboard({ schoolName }: { schoolName: string
         await refreshLocal();
         if (navigator.onLine) {
           try {
-            await refreshFromServer();
-            await syncPending();
+            if (await refreshFromServer()) await syncPending();
           } catch (error) {
             if (active) {
               setPageError(error instanceof Error
@@ -293,6 +347,15 @@ export default function AttendanceDashboard({ schoolName }: { schoolName: string
     event.preventDefault();
     setFormError("");
     setNotice("");
+
+    if (datasetResetRequiredRef.current) {
+      setFormError("Clear the old device data before recording attendance for this database.");
+      return;
+    }
+    if (!datasetVerified) {
+      setFormError("Connect to the internet to verify this attendance database before recording.");
+      return;
+    }
 
     const cleanName = studentName.trim();
     if (!cleanName) {
@@ -372,7 +435,14 @@ export default function AttendanceDashboard({ schoolName }: { schoolName: string
   }
 
   async function handleSignOut(record: AttendanceRecord) {
-    if (!staff || !record.signedInAt || record.signedOutAt || signingOut.has(record.sessionRef)) return;
+    if (
+      datasetResetRequiredRef.current ||
+      !datasetVerified ||
+      !staff ||
+      !record.signedInAt ||
+      record.signedOutAt ||
+      signingOut.has(record.sessionRef)
+    ) return;
     setSigningOut((current) => new Set(current).add(record.sessionRef));
     setNotice("");
     setPageError("");
@@ -428,8 +498,40 @@ export default function AttendanceDashboard({ schoolName }: { schoolName: string
     }
   }
 
+  async function handleClearOldDeviceData() {
+    const datasetId = datasetIdRef.current;
+    if (!datasetId || !datasetResetRequiredRef.current || clearingDataset) return;
+    const confirmed = window.confirm(
+      "This permanently deletes attendance and pending offline records saved on this device. Continue?",
+    );
+    if (!confirmed) return;
+
+    setClearingDataset(true);
+    setPageError("");
+    try {
+      await clearAttendanceForDataset(datasetId);
+      datasetResetRequiredRef.current = false;
+      setDatasetResetRequired(false);
+      setDatasetVerified(true);
+      await refreshLocal();
+      if (await refreshFromServer()) {
+        setNotice("Old device records cleared. Showing attendance from this database.");
+      }
+    } catch (error) {
+      setPageError(error instanceof Error ? error.message : "Could not clear old device data.");
+    } finally {
+      setClearingDataset(false);
+    }
+  }
+
   async function handleMessage(record: AttendanceRecord, type: "sign_in" | "sign_out") {
-    if (!record.signedInAt || !online || (type === "sign_out" && !record.signedOutAt)) return;
+    if (
+      datasetResetRequiredRef.current ||
+      !datasetVerified ||
+      !record.signedInAt ||
+      !online ||
+      (type === "sign_out" && !record.signedOutAt)
+    ) return;
     setOpeningMessage((current) => new Set(current).add(record.sessionRef));
     setPageError("");
     const message = type === "sign_in"
@@ -448,7 +550,7 @@ export default function AttendanceDashboard({ schoolName }: { schoolName: string
       );
     const opened = window.open(buildWhatsAppUrl(message, record.parentPhone), "_blank");
     if (!opened) {
-      setPageError("WhatsApp could not be opened. Check your browser’s pop-up settings or copy the number and times.");
+      setPageError("WhatsApp could not be opened. Check your browser’s pop-up settings or copy the number and send manually.");
       setOpeningMessage((current) => {
         const next = new Set(current);
         next.delete(record.sessionRef);
@@ -542,7 +644,15 @@ export default function AttendanceDashboard({ schoolName }: { schoolName: string
   return (
     <main className="app-shell">
       <header className="app-header">
-        <span className="staff-line">{staff.staffName} · staff</span>
+        <div className="header-brand">
+          <img
+            className="brand-logo"
+            src="/branding/school-logo.webp"
+            alt={`${schoolName} logo`}
+            width={1000}
+            height={368}
+          />
+        </div>
         <div className="header-tools">
           <a className="text-button" href="/review">Day review</a>
           <button
@@ -551,30 +661,37 @@ export default function AttendanceDashboard({ schoolName }: { schoolName: string
             disabled={!online}
             title={!online ? "Reconnect to log out" : undefined}
           >
-            Log out
+            {staff.staffName}, log out
           </button>
         </div>
       </header>
 
       <section className="day-intro">
-        <div>
-          <h1>Attendance</h1>
-          <p className="date-line">{dateLabel}</p>
-        </div>
+        <h1>Saturday lesson</h1>
+        <p className="date-line">{dateLabel}</p>
       </section>
 
-      <div className="list-tools">
-        <input
-          type="search"
-          aria-label="Search children"
-          placeholder="Search child"
-          value={search}
-          onChange={(event) => setSearch(event.target.value)}
-        />
-        <span>{inSchool.length} in school</span>
-      </div>
-
       {!online && <p className="offline-note" role="status">Offline · records saved on this phone</p>}
+      {!datasetVerified && !datasetResetRequired && (
+        <p className="dataset-reset-notice" role="status">
+          Connect to the internet to verify this attendance database before recording.
+        </p>
+      )}
+      {datasetResetRequired && (
+        <section className="dataset-reset-notice" role="alert">
+          <div>
+            <strong>This device has data from a different database.</strong>
+            <p>Old attendance and unsynced records are hidden and will not sync. Clear them before using this database.</p>
+          </div>
+          <button
+            className="button button-secondary"
+            onClick={() => void handleClearOldDeviceData()}
+            disabled={clearingDataset}
+          >
+            {clearingDataset ? "Clearing…" : "Clear old device data"}
+          </button>
+        </section>
+      )}
       {pendingCount > 0 && (
         <div className="pending-note" aria-live="polite">
           <span>{failedCount ? `${failedCount} failed to sync` : `${pendingCount} waiting to sync`}</span>
@@ -589,137 +706,195 @@ export default function AttendanceDashboard({ schoolName }: { schoolName: string
       {pageError && <p className="alert alert--error" role="alert">{pageError}</p>}
       {notice && <p className="alert alert--success" role="status">{notice}</p>}
 
+      <section className="attendance-board" aria-label="Attendance register">
+        <div className="attendance-tabs" role="tablist" aria-label="Attendance status">
+          <button
+            id="in-school-tab"
+            className={`attendance-tab${activeTab === "in-school" ? " attendance-tab--active" : ""}`}
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "in-school"}
+            aria-controls="in-school-panel"
+            onClick={() => setActiveTab("in-school")}
+          >
+            In school <span>{inSchool.length}</span>
+          </button>
+          <button
+            id="signed-out-tab"
+            className={`attendance-tab${activeTab === "signed-out" ? " attendance-tab--active" : ""}`}
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "signed-out"}
+            aria-controls="signed-out-panel"
+            onClick={() => setActiveTab("signed-out")}
+          >
+            Signed out <span>{signedOut.length}</span>
+          </button>
+        </div>
+
+        <div className="list-tools">
+          <input
+            type="search"
+            aria-label="Search children"
+            placeholder="Search children"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+          />
+        </div>
+
+        <section
+          className="roster-section"
+          id="in-school-panel"
+          role="tabpanel"
+          aria-labelledby="in-school-tab"
+          hidden={activeTab !== "in-school"}
+        >
+          {loading && records.length === 0 ? (
+            <p className="empty-state">Loading attendance…</p>
+          ) : visibleInSchool.length === 0 ? (
+            <div className="empty-state">
+              <strong>{search ? "No children found." : "No one signed in yet."}</strong>
+            </div>
+          ) : (
+            <ul className="student-list">
+              {visibleInSchool.map((record) => {
+                const sync = syncSummary(record);
+                return (
+                  <li className="student-card" key={record.sessionRef}>
+                    <div className="student-details">
+                      <div className="student-identity">
+                        <strong className="student-name">{record.studentName}</strong>
+                        <span className="student-phone">{record.parentPhone}</span>
+                        <span className={sync.className}>{sync.label}</span>
+                      </div>
+                      <span className="student-time">{formatTime(record.signedInAt)}</span>
+                      {record.syncError && <span className="sync-error">{record.syncError}</span>}
+                    </div>
+                    <div className="arrival-actions">
+                      <button
+                        className="button button-message"
+                        disabled={!online || !datasetVerified || datasetResetRequired || openingMessage.has(record.sessionRef)}
+                        onClick={() => void handleMessage(record, "sign_in")}
+                        title={!online ? "Connect to the internet to open WhatsApp" : undefined}
+                      >
+                        {openingMessage.has(record.sessionRef) ? "Opening…" : "Send msg"}
+                      </button>
+                      <button
+                        className="button button-checkout"
+                        disabled={!datasetVerified || datasetResetRequired || signingOut.has(record.sessionRef)}
+                        onClick={() => void handleSignOut(record)}
+                      >
+                        {signingOut.has(record.sessionRef) ? "Saving…" : "Sign out"}
+                      </button>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </section>
+
+        <section
+          className="roster-section checked-out-section"
+          id="signed-out-panel"
+          role="tabpanel"
+          aria-labelledby="signed-out-tab"
+          hidden={activeTab !== "signed-out"}
+        >
+          {outstandingCount > 0 && (
+            <p className="message-hint">
+              <strong>{outstandingCount} message{outstandingCount === 1 ? "" : "s"} not sent</strong>
+              <span>Each opens WhatsApp with the text ready.</span>
+            </p>
+          )}
+          {visibleSignedOut.length === 0 ? (
+            <p className="empty-state empty-state--compact">{search ? "No children found." : "No one signed out yet."}</p>
+          ) : (
+            <ul className="student-list">
+              {visibleSignedOut.map((record) => {
+                const sync = syncSummary(record);
+                return (
+                  <li className="student-card student-card--completed" key={record.sessionRef}>
+                    <div className="student-details">
+                      <div className="student-identity">
+                        <strong className="student-name">{record.studentName}</strong>
+                        <span className="student-phone">{record.parentPhone}</span>
+                        <span className={sync.className}>{sync.label}</span>
+                      </div>
+                      <span className="student-time student-time--range">
+                        {formatTime(record.signedInAt)} to {formatTime(record.signedOutAt)}
+                      </span>
+                      {record.syncError && <span className="sync-error">{record.syncError}</span>}
+                    </div>
+                    <div className="message-actions">
+                      {record.whatsappLaunchedAt && (
+                        <span className="message-opened">✓ Sent {formatTime(record.whatsappLaunchedAt)}</span>
+                      )}
+                      <button
+                        className="button button-message"
+                        disabled={!online || !datasetVerified || datasetResetRequired || openingMessage.has(record.sessionRef)}
+                        onClick={() => void handleMessage(record, "sign_out")}
+                        title={!online ? "Connect to the internet to open WhatsApp" : undefined}
+                      >
+                        {openingMessage.has(record.sessionRef) ? "Opening…" : "Send again?"}
+                      </button>
+                      <button className="copy-button" onClick={() => void handleCopy(record)}>Copy</button>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </section>
+
+        {activeTab === "signed-out" && inSchool.length > 0 && (
+          <div className="attendance-footer">
+            <span>{inSchool.length} {inSchool.length === 1 ? "child is" : "children are"} still in school.</span>
+            <button className="button button-secondary" onClick={() => setActiveTab("in-school")}>See who</button>
+          </div>
+        )}
+      </section>
+
       <section className="sign-in-card" aria-labelledby="sign-in-title">
         <div className="section-heading">
-          <h2 id="sign-in-title">Sign in</h2>
+          <h2 id="sign-in-title">Sign in a child</h2>
         </div>
         <form className="attendance-form" onSubmit={handleSignIn}>
           <label className="field">
-            <span>Child’s name</span>
+            <span>Student name</span>
             <input
               ref={nameInput}
               autoComplete="off"
               maxLength={100}
-              placeholder="Child’s full name"
+              placeholder="Full name"
               value={studentName}
               onChange={(event) => setStudentName(event.target.value)}
+              disabled={datasetResetRequired || !datasetVerified}
               required
             />
           </label>
           <label className="field">
-            <span>Parent phone</span>
+            <span>Parent’s phone</span>
             <input
               autoComplete="tel"
               inputMode="tel"
               placeholder="0801 234 5678"
               value={parentPhone}
               onChange={(event) => setParentPhone(event.target.value)}
+              disabled={datasetResetRequired || !datasetVerified}
               required
             />
           </label>
           {formError && <p className="inline-error" role="alert">{formError}</p>}
-          <button className="button button-primary button-sign-in" type="submit" disabled={saving}>
-            <span aria-hidden="true">＋</span>
+          <button
+            className="button button-primary button-sign-in"
+            type="submit"
+            disabled={saving || datasetResetRequired || !datasetVerified}
+          >
             {saving ? "Saving…" : "Sign in"}
           </button>
         </form>
       </section>
-
-      <section className="roster-section" aria-labelledby="in-school-title">
-        <div className="roster-heading">
-          <div>
-            <h2 id="in-school-title">In school <span className="count-pill">{inSchool.length}</span></h2>
-          </div>
-        </div>
-        {loading && records.length === 0 ? (
-          <p className="empty-state">Loading attendance…</p>
-        ) : visibleInSchool.length === 0 ? (
-          <div className="empty-state">
-            <strong>{search ? "No children found." : "No one signed in yet."}</strong>
-          </div>
-        ) : (
-          <ul className="student-list">
-            {visibleInSchool.map((record) => {
-              const sync = syncSummary(record);
-              return (
-                <li className="student-card" key={record.sessionRef}>
-                  <div className="student-details">
-                    <strong className="student-name">{record.studentName}</strong>
-                    <span className="student-meta">
-                      {formatTime(record.signedInAt)}
-                    </span>
-                    <span className={sync.className}>{sync.label}</span>
-                    {record.syncError && <span className="sync-error">{record.syncError}</span>}
-                  </div>
-                  <div className="arrival-actions">
-                    <button
-                      className="button button-message"
-                      disabled={!online || openingMessage.has(record.sessionRef)}
-                      onClick={() => void handleMessage(record, "sign_in")}
-                      title={!online ? "Connect to the internet to open WhatsApp" : undefined}
-                    >
-                      {openingMessage.has(record.sessionRef) ? "Opening…" : "Send msg"}
-                    </button>
-                    <button
-                      className="button button-checkout"
-                      disabled={signingOut.has(record.sessionRef)}
-                      onClick={() => void handleSignOut(record)}
-                    >
-                      {signingOut.has(record.sessionRef) ? "Saving…" : "Sign out"}
-                    </button>
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </section>
-
-      <section className="roster-section checked-out-section" aria-labelledby="checked-out-title">
-        <div className="roster-heading">
-          <div>
-            <h2 id="checked-out-title">Signed out today <span className="count-pill count-pill--muted">{signedOut.length}</span></h2>
-          </div>
-        </div>
-        {visibleSignedOut.length === 0 ? (
-          <p className="empty-state empty-state--compact">{search ? "No children found." : "No one signed out yet."}</p>
-        ) : (
-          <ul className="student-list">
-            {visibleSignedOut.map((record) => {
-              const sync = syncSummary(record);
-              return (
-                <li className="student-card student-card--completed" key={record.sessionRef}>
-                  <div className="student-details">
-                    <strong className="student-name">{record.studentName}</strong>
-                    <span className="student-meta">
-                      {formatTime(record.signedInAt)} – {formatTime(record.signedOutAt)}
-                    </span>
-                    <span className={sync.className}>{sync.label}</span>
-                    {record.syncError && <span className="sync-error">{record.syncError}</span>}
-                  </div>
-                  <div className="message-actions">
-                    {!record.whatsappLaunchedAt ? (
-                      <button
-                        className="button button-message"
-                        disabled={!online || openingMessage.has(record.sessionRef)}
-                        onClick={() => void handleMessage(record, "sign_out")}
-                        title={!online ? "Connect to the internet to open WhatsApp" : undefined}
-                      >
-                        {openingMessage.has(record.sessionRef) ? "Opening…" : "Send msg"}
-                      </button>
-                    ) : (
-                      <span className="message-opened">WhatsApp opened</span>
-                    )}
-                    <button className="copy-button" onClick={() => void handleCopy(record)}>Copy</button>
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </section>
-
-      {outstandingCount > 0 && <p className="app-footer">{outstandingCount} messages to send</p>}
     </main>
   );
 }

@@ -14,6 +14,7 @@ import { NextResponse } from "next/server";
 
 import { getServerSupabaseClient } from "@/lib/supabase/server";
 import { SESSION_COOKIE_NAME, validateSessionToken } from "@/lib/session";
+import { getAttendanceDatasetId } from "@/lib/attendance-dataset";
 
 interface SessionRow {
   session_ref: string;
@@ -56,6 +57,7 @@ interface OutstandingMessage {
 }
 
 interface DayResponse {
+  datasetId: string;
   dayKey: string;
   sessions: SessionSnapshot[];
   outstandingMessages: OutstandingMessage[];
@@ -102,6 +104,13 @@ export async function GET(req: Request): Promise<Response> {
 
   const url = new URL(req.url);
   const dayKey = url.searchParams.get("dayKey") || lagosDayKey();
+  const datasetId = getAttendanceDatasetId();
+  if (!datasetId) {
+    return NextResponse.json(
+      { error: "dataset_not_configured", serverTime },
+      { status: 503 },
+    );
+  }
 
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dayKey)) {
     return NextResponse.json(
@@ -150,6 +159,7 @@ export async function GET(req: Request): Promise<Response> {
     }));
 
   const response: DayResponse = {
+    datasetId,
     dayKey,
     sessions,
     outstandingMessages,

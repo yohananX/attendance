@@ -56,6 +56,7 @@ interface ServerRecord {
 const DATABASE_NAME = "grace-house-attendance";
 const DATABASE_VERSION = 1;
 const RECORDS_STORE = "attendance";
+const DATASET_KEY = "gh_attendance_dataset";
 
 function openDatabase(): Promise<IDBDatabase> {
   if (typeof indexedDB === "undefined") {
@@ -100,6 +101,47 @@ export function getAttendanceForDay(dayKey: string): Promise<AttendanceRecord[]>
       reject(transaction.error ?? new Error("Could not read local attendance."));
     };
   }));
+}
+
+export async function matchAttendanceDataset(datasetId: string): Promise<boolean> {
+  const storedDatasetId = localStorage.getItem(DATASET_KEY);
+  if (storedDatasetId === datasetId) return true;
+
+  const database = await openDatabase();
+  try {
+    const transaction = database.transaction(RECORDS_STORE, "readonly");
+    const request = transaction.objectStore(RECORDS_STORE).count();
+    const done = transactionDone(transaction);
+    const recordCount = await new Promise<number>((resolve, reject) => {
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error ?? new Error("Could not check local attendance data."));
+    });
+    await done;
+
+    if (storedDatasetId === null && recordCount === 0) {
+      localStorage.setItem(DATASET_KEY, datasetId);
+      return true;
+    }
+    return false;
+  } finally {
+    database.close();
+  }
+}
+
+export function getStoredAttendanceDatasetId(): string | null {
+  return localStorage.getItem(DATASET_KEY);
+}
+
+export async function clearAttendanceForDataset(datasetId: string): Promise<void> {
+  const database = await openDatabase();
+  try {
+    const transaction = database.transaction(RECORDS_STORE, "readwrite");
+    transaction.objectStore(RECORDS_STORE).clear();
+    await transactionDone(transaction);
+    localStorage.setItem(DATASET_KEY, datasetId);
+  } finally {
+    database.close();
+  }
 }
 
 export async function saveSignIn(

@@ -70,6 +70,7 @@ const rows = [
 beforeEach(() => {
   process.env = { ...originalEnv };
   process.env.SESSION_SECRET = "test-secret";
+  process.env.ATTENDANCE_DATASET_ID = "test-dataset";
   vi.resetAllMocks();
 
   const client = {
@@ -119,6 +120,7 @@ describe("GET /api/day", () => {
     const res = await makeRequest();
     expect(res.status).toBe(200);
     const body = await res.json();
+    expect(body.datasetId).toBe("test-dataset");
     expect(body.dayKey).toBe("2026-10-31");
     expect(Array.isArray(body.sessions)).toBe(true);
     expect(body.sessions).toHaveLength(3);

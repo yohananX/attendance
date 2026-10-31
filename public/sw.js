@@ -1,11 +1,12 @@
 const CACHE_PREFIX = "gh-attendance-";
-const CACHE_VERSION = "gh-attendance-shell-v4";
+const CACHE_VERSION = "gh-attendance-shell-v6";
 const SHELL_CACHE = CACHE_VERSION;
 const SHELL_ASSETS = [
   "/",
   "/login",
   "/dashboard",
   "/review",
+  "/branding/school-logo.webp",
   "/offline",
   "/manifest.webmanifest",
   "/icons/icon-192.png",
@@ -39,15 +40,7 @@ self.addEventListener("fetch", (event) => {
 
   if (req.mode === "navigate") {
     event.respondWith(
-      fetch(req).then((response) => {
-        if (response.ok) {
-          return caches.open(SHELL_CACHE).then((cache) => {
-            cache.put(req, response.clone());
-            return response;
-          });
-        }
-        return response;
-      }).catch(() => caches.open(SHELL_CACHE).then(async (cache) =>
+      fetch(new Request(req, { cache: "no-store" })).catch(() => caches.open(SHELL_CACHE).then(async (cache) =>
         (await cache.match(req)) ||
         (await cache.match("/dashboard")) ||
         (await cache.match("/offline")) ||

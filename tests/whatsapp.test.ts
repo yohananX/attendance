@@ -30,7 +30,7 @@ describe("WhatsApp attendance messages", () => {
     )).toBe([
       "Grace House School",
       "",
-      "Ada Lovelace has left school.",
+      "Ada Lovelace has left the school.",
       "Sign-in: 8:40 AM",
       "Sign-out: 1:15 PM",
     ].join("\n"));

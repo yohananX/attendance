@@ -6,12 +6,16 @@ import { buildAttendanceCsv } from "@/lib/attendance-csv";
 import {
   AttendanceRecord,
   clearCachedStaffSession,
+  clearAttendanceForDataset,
   getAttendanceForDay,
   getCachedStaffSession,
+  getStoredAttendanceDatasetId,
+  matchAttendanceDataset,
   mergeServerAttendance,
 } from "@/lib/attendance-store";
 
 interface ServerDay {
+  datasetId: string;
   sessions: Omit<AttendanceRecord, "pendingEvents" | "syncError">[];
 }
 
@@ -44,13 +48,24 @@ export default function DayReview() {
   const [online, setOnline] = useState(true);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [datasetResetRequired, setDatasetResetRequired] = useState(false);
+  const [datasetVerified, setDatasetVerified] = useState(false);
+  const [datasetId, setDatasetId] = useState<string | null>(null);
+  const [clearingDataset, setClearingDataset] = useState(false);
 
   const loadRecords = useCallback(async () => {
     setError("");
     try {
       const localRecords = await getAttendanceForDay(dayKey);
-      setRecords(localRecords);
-      if (!navigator.onLine) return;
+      if (!navigator.onLine) {
+        if (getStoredAttendanceDatasetId()) {
+          setDatasetVerified(true);
+          setRecords(localRecords);
+        } else {
+          setRecords([]);
+        }
+        return;
+      }
 
       const response = await fetch(`/api/day?dayKey=${encodeURIComponent(dayKey)}`, {
         credentials: "include",
@@ -64,6 +79,18 @@ export default function DayReview() {
       if (!response.ok) throw new Error("Could not load today’s attendance.");
 
       const data = (await response.json()) as ServerDay;
+      if (typeof data.datasetId !== "string" || !data.datasetId) {
+        throw new Error("The server did not identify this attendance dataset.");
+      }
+      setDatasetId(data.datasetId);
+      if (!await matchAttendanceDataset(data.datasetId)) {
+        setDatasetResetRequired(true);
+        setDatasetVerified(false);
+        setRecords([]);
+        return;
+      }
+      setDatasetResetRequired(false);
+      setDatasetVerified(true);
       setRecords(await mergeServerAttendance(dayKey, data.sessions));
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Could not load attendance.");
@@ -92,6 +119,26 @@ export default function DayReview() {
     };
   }, [loadRecords]);
 
+  async function handleClearOldDeviceData() {
+    if (!datasetId || !datasetResetRequired || clearingDataset) return;
+    const confirmed = window.confirm(
+      "This permanently deletes attendance and pending offline records saved on this device. Continue?",
+    );
+    if (!confirmed) return;
+    setClearingDataset(true);
+    setError("");
+    try {
+      await clearAttendanceForDataset(datasetId);
+      setDatasetResetRequired(false);
+      setDatasetVerified(true);
+      await loadRecords();
+    } catch (clearError) {
+      setError(clearError instanceof Error ? clearError.message : "Could not clear old device data.");
+    } finally {
+      setClearingDataset(false);
+    }
+  }
+
   function exportCsv() {
     const csv = buildAttendanceCsv(records, formatTime);
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
@@ -108,13 +155,37 @@ export default function DayReview() {
       <header className="review-header">
         <a className="review-back" href="/dashboard">← Back</a>
         <h1>Day review · {formatDay(dayKey)}</h1>
-        <button className="button button-primary export-button" onClick={exportCsv} disabled={loading}>
+        <button
+          className="button button-primary export-button"
+          onClick={exportCsv}
+          disabled={loading || datasetResetRequired || !datasetVerified}
+        >
           Export CSV
         </button>
       </header>
 
       {!online && <p className="review-note">Offline · showing records saved on this phone</p>}
       {error && <p className="alert alert--error" role="alert">{error}</p>}
+      {datasetResetRequired && (
+        <section className="dataset-reset-notice" role="alert">
+          <div>
+            <strong>This device has data from a different database.</strong>
+            <p>Old attendance and unsynced records are hidden and will not sync. Clear them before using this database.</p>
+          </div>
+          <button
+            className="button button-secondary"
+            onClick={() => void handleClearOldDeviceData()}
+            disabled={clearingDataset}
+          >
+            {clearingDataset ? "Clearing…" : "Clear old device data"}
+          </button>
+        </section>
+      )}
+      {!datasetVerified && !datasetResetRequired && (
+        <p className="dataset-reset-notice" role="status">
+          Connect to the internet to verify this attendance database before viewing or exporting records.
+        </p>
+      )}
 
       <div className="review-table-wrap">
         <table className="review-table">

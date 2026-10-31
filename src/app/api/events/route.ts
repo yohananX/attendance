@@ -35,6 +35,7 @@ import { getServerSupabaseClient, SupabaseConfigError } from "@/lib/supabase/ser
 import { applySessionProjection } from "@/lib/supabase/rpc";
 import { getStaffName, lagosDateKey, lagosDayDifference } from "@/lib/session";
 import { normalizePhone } from "@/lib/phone";
+import { getAttendanceDatasetId } from "@/lib/attendance-dataset";
 
 const MAX_BATCH_EVENTS = 50;
 const MAX_BATCH_BYTES = 128 * 1024;
@@ -299,12 +300,23 @@ export async function POST(req: Request): Promise<Response> {
     return NextResponse.json({ error: "unauthenticated", serverTime }, { status: 401 });
   }
 
+  const datasetId = getAttendanceDatasetId();
+  if (!datasetId) {
+    return NextResponse.json({ error: "dataset_not_configured", serverTime }, { status: 503 });
+  }
+
   // 2. Parse the batch envelope.
-  let body: { events?: unknown; probe?: unknown };
+  let body: { datasetId?: unknown; events?: unknown; probe?: unknown };
   try {
     body = await req.json();
   } catch {
     return NextResponse.json({ error: "malformed_request", serverTime }, { status: 400 });
+  }
+  if (body.datasetId !== datasetId) {
+    return NextResponse.json(
+      { error: "dataset_mismatch", datasetId, serverTime },
+      { status: 409 },
+    );
   }
   if (!Array.isArray(body.events) || body.events.length === 0) {
     return NextResponse.json({ error: "malformed_request", serverTime }, { status: 400 });

@@ -34,7 +34,7 @@ export function buildSignOutMessage(
   return [
     schoolName,
     "",
-    `${studentName} has left school.`,
+    `${studentName} has left the school.`,
     `Sign-in: ${signInTime}`,
     `Sign-out: ${signOutTime}`,
     ...(attendanceDate ? [`Date: ${attendanceDate}`] : []),

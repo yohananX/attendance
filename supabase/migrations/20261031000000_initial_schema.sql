@@ -207,10 +207,10 @@ CREATE INDEX IF NOT EXISTS idx_app_settings_key ON app_settings(setting_key);
 -- would let succeed with an empty result set.
 -- ============================================================
 CREATE OR REPLACE FUNCTION health_privilege_check()
-RETURNS text
+RETURNS boolean
 LANGUAGE sql
 AS $$
-  SELECT current_user;
+  SELECT current_user = 'service_role';
 $$;
 
 -- ============================================================
@@ -258,7 +258,8 @@ BEGIN
     ON CONFLICT (session_ref) DO NOTHING;
   ELSIF p_event_type = 'sign_out' THEN
     UPDATE sessions
-    SET signed_out_at = p_event_at, signed_out_by = p_staff_name
+    SET signed_out_at = p_event_at, signed_out_by = p_staff_name,
+        server_version = server_version + 1
     WHERE session_ref = p_session_ref AND signed_out_at IS NULL;
   END IF;
 END;
@@ -297,18 +298,40 @@ BEGIN
 
   IF v_current_version <> p_base_server_version THEN
     -- Version mismatch: do not apply; flag for review, retain both values.
-    UPDATE sessions SET conflict_type = 'correction_conflict'
+    UPDATE sessions SET conflict_type = 'correction_conflict',
+                        needs_review = true
     WHERE session_ref = p_session_ref;
+    INSERT INTO corrections (correction_event_id, session_ref, field, original_value,
+                             new_value, base_value, base_server_version, applied,
+                             conflict_id, edited_by)
+    VALUES (gen_random_uuid(), p_session_ref, p_field,
+            to_char(v_old_value, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+            to_char(p_new_value, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+            to_char(v_old_value, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+            p_base_server_version, false, p_conflict_id, p_edited_by);
     RETURN v_current_version;
   END IF;
 
   IF p_field = 'signed_in_at' THEN
-    UPDATE sessions SET signed_in_at = p_new_value, server_version = server_version + 1
+    UPDATE sessions SET signed_in_at = p_new_value, server_version = server_version + 1,
+                        corrected = true
     WHERE session_ref = p_session_ref;
   ELSE
-    UPDATE sessions SET signed_out_at = p_new_value, server_version = server_version + 1
+    UPDATE sessions SET signed_out_at = p_new_value, server_version = server_version + 1,
+                        corrected = true
     WHERE session_ref = p_session_ref;
   END IF;
+
+  -- Write the correction event to the append-only log (preserves the audit trail
+  -- alongside the corrections row; events remain immutable/byte-identical).
+  INSERT INTO events (event_id, event_type, session_ref, student_name, parent_phone,
+                      device_event_at, server_received_at, queued_duration,
+                      captured_offline, device_id, device_seq, staff_name,
+                      day_key, conflict_marker, ingest_result)
+  SELECT gen_random_uuid(), 'correction', p_session_ref, s.student_name, s.parent_phone,
+         p_new_value, now(), interval '0', false,
+         gen_random_uuid(), 1, p_edited_by, s.day_key, 'none', 'accepted'
+  FROM sessions s WHERE s.session_ref = p_session_ref;
 
   INSERT INTO corrections (correction_event_id, session_ref, field, original_value,
                            new_value, base_value, base_server_version, applied,
@@ -364,6 +387,7 @@ ALTER TABLE events   ENABLE ROW LEVEL SECURITY;
 ALTER TABLE conflicts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE corrections ENABLE ROW LEVEL SECURITY;
 ALTER TABLE login_attempts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE app_settings ENABLE ROW LEVEL SECURITY;
 
 -- Deliberately no CREATE POLICY statements: with RLS enabled and no policies,
 -- all non-service-role roles are denied by default.

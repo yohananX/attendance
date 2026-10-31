@@ -22,7 +22,7 @@ describe("migration SQL content", () => {
   });
 
   it("enables RLS with no policies on every data table", () => {
-    for (const t of ["sessions", "events", "conflicts", "corrections", "login_attempts"]) {
+    for (const t of ["sessions", "events", "conflicts", "corrections", "login_attempts", "app_settings"]) {
       expect(MIGRATION).toMatch(new RegExp(`ALTER TABLE\\s+${t}\\s+ENABLE ROW LEVEL SECURITY;`));
     }
     expect(MIGRATION).not.toMatch(/^[ \t]*CREATE POLICY/m);

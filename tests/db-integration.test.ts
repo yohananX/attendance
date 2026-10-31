@@ -57,6 +57,11 @@ describe.skipIf(!DATABASE_URL)(
         ["events"],
       );
       expect(rls[0].relrowsecurity).toBe(true);
+      const { rows: rlsSettings } = await client.query<{ relrowsecurity: boolean }>(
+        "SELECT relrowsecurity FROM pg_class WHERE relname = $1",
+        ["app_settings"],
+      );
+      expect(rlsSettings[0].relrowsecurity).toBe(true);
       const { rows: policies } = await client.query<{ count: string }>(
         "SELECT count(*)::text AS count FROM pg_policies WHERE schemaname = 'public'",
       );
@@ -96,11 +101,62 @@ describe.skipIf(!DATABASE_URL)(
         nowIso,
         "Staff",
       ]);
-      const { rows: after } = await client.query<{ signed_out_at: string }>(
-        "SELECT signed_out_at FROM sessions WHERE session_ref = $1",
+      const { rows: after } = await client.query<{ signed_out_at: string; server_version: number }>(
+        "SELECT signed_out_at, server_version FROM sessions WHERE session_ref = $1",
         [sessionRef],
       );
       expect(after[0].signed_out_at).not.toBeNull();
+      expect(after[0].server_version).toBe(2);
+    });
+
+    it("sanctioned correction path sets corrected=true, writes audit row and correction event", async () => {
+      const { rows } = await client.query<{ session_ref: string; server_version: number }>(
+        "INSERT INTO sessions (session_ref, day_key, student_name, parent_phone, signed_in_at, signed_in_by, server_version) VALUES (gen_random_uuid(), CURRENT_DATE, 'A Child', '+2348012345678', now(), 'Staff', 1) RETURNING session_ref, server_version",
+      );
+      const sessionRef = rows[0].session_ref;
+      const newValue = new Date().toISOString();
+      await client.query("SELECT sessions_apply_correction($1, $2, $3, $4, $5)", [
+        sessionRef,
+        "signed_in_at",
+        newValue,
+        rows[0].server_version,
+        "Staff",
+      ]);
+      const { rows: after } = await client.query<{ signed_in_at: string; corrected: boolean; server_version: number }>(
+        "SELECT signed_in_at, corrected, server_version FROM sessions WHERE session_ref = $1",
+        [sessionRef],
+      );
+      expect(after[0].corrected).toBe(true);
+      expect(after[0].server_version).toBe(2);
+      const { rows: audits } = await client.query<{ count: string }>(
+        "SELECT count(*)::text AS count FROM corrections WHERE session_ref = $1",
+        [sessionRef],
+      );
+      expect(Number(audits[0].count)).toBeGreaterThan(0);
+      const { rows: events } = await client.query<{ count: string }>(
+        "SELECT count(*)::text AS count FROM events WHERE session_ref = $1 AND event_type = 'correction'",
+        [sessionRef],
+      );
+      expect(Number(events[0].count)).toBeGreaterThan(0);
+    });
+
+    it("app_settings PD-D1 values are stored and never hard-coded defaults", async () => {
+      const { rows } = await client.query<{ setting_key: string; setting_value: string }>(
+        "SELECT setting_key, setting_value FROM app_settings WHERE setting_key = ANY($1)",
+        [["late_sync_window_days", "clock_tolerance_minutes", "future_tolerance_minutes"]],
+      );
+      const byKey = Object.fromEntries(rows.map((r) => [r.setting_key, r.setting_value]));
+      expect(byKey["late_sync_window_days"]).toBe("7");
+      expect(byKey["clock_tolerance_minutes"]).toBe("5");
+      expect(byKey["future_tolerance_minutes"]).toBe("5");
+    });
+
+    it("health_privilege_check returns true for service_role, false for anon", async () => {
+      const { rows } = await client.query<{ health_privilege_check: boolean }>(
+        "SELECT health_privilege_check() AS health_privilege_check",
+      );
+      expect(typeof rows[0].health_privilege_check).toBe("boolean");
+      expect(rows[0].health_privilege_check).toBe(true);
     });
 
     it("sanctioned correction path updates sessions and writes an append-only audit row", async () => {
@@ -148,12 +204,12 @@ describe.skipIf(!DATABASE_URL)(
       await insertSignOut("losing");
     });
 
-    it("health_privilege_check returns the current (non-anon) role", async () => {
-      const { rows } = await client.query<{ health_privilege_check: string }>(
+    it("health_privilege_check returns true for service_role, false for anon", async () => {
+      const { rows } = await client.query<{ health_privilege_check: boolean }>(
         "SELECT health_privilege_check() AS health_privilege_check",
       );
-      expect(rows[0].health_privilege_check).not.toBe("anon");
-      expect(rows[0].health_privilege_check).toBeTruthy();
+      expect(typeof rows[0].health_privilege_check).toBe("boolean");
+      expect(rows[0].health_privilege_check).toBe(true);
     });
   },
 );

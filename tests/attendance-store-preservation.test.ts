@@ -10,6 +10,8 @@ import {
 
 // ---------------------------------------------------------------------------
 // Fake IndexedDB + localStorage so attendance-store can be exercised in node.
+// The fake models transaction lifecycle (active/completed/aborted) and abort
+// rollback so the D6 behaviour can be verified without a browser.
 // ---------------------------------------------------------------------------
 
 const STORE_NAME = "attendance";
@@ -43,9 +45,10 @@ class IDBRequestFake<T = unknown> {
 class IDBObjectStoreFake {
   tx: IDBTransactionFake | null = null;
 
-  // Defer completion to a microtask so callers can attach transaction
-  // oncomplete/onabort handlers (as the real store does) before the
-  // transaction finishes. Mirrors real asynchronous IndexedDB behaviour.
+  // Records the mutation operations applied during this transaction so abort
+  // can roll them back, mirroring real IndexedDB transaction semantics.
+  private pendingOps: Array<() => void> = [];
+
   private complete() {
     queueMicrotask(() => this.tx?.complete());
   }
@@ -65,7 +68,15 @@ class IDBObjectStoreFake {
   }
 
   put(value: StoredRecord) {
+    if (!this.tx?.active) {
+      throw new Error("Cannot write to an inactive IndexedDB transaction.");
+    }
+    const previous = records.get(value.sessionRef);
     records.set(value.sessionRef, value);
+    this.pendingOps.push(() => {
+      if (previous === undefined) records.delete(value.sessionRef);
+      else records.set(value.sessionRef, previous);
+    });
     const req = new IDBRequestFake();
     req.resolve(undefined);
     this.complete();
@@ -73,7 +84,14 @@ class IDBObjectStoreFake {
   }
 
   delete(key: string) {
+    if (!this.tx?.active) {
+      throw new Error("Cannot delete from an inactive IndexedDB transaction.");
+    }
+    const previous = records.get(key);
     records.delete(key);
+    this.pendingOps.push(() => {
+      if (previous !== undefined) records.set(key, previous);
+    });
     const req = new IDBRequestFake();
     req.resolve(undefined);
     this.complete();
@@ -81,7 +99,15 @@ class IDBObjectStoreFake {
   }
 
   clear() {
+    if (!this.tx?.active) {
+      throw new Error("Cannot clear an inactive IndexedDB transaction.");
+    }
+    const snapshot = new Map(records);
     records.clear();
+    this.pendingOps.push(() => {
+      records.clear();
+      for (const [key, value] of snapshot) records.set(key, value);
+    });
     const req = new IDBRequestFake();
     req.resolve(undefined);
     this.complete();
@@ -94,11 +120,17 @@ class IDBObjectStoreFake {
     this.complete();
     return req;
   }
+
+  rollback() {
+    for (const op of this.pendingOps.reverse()) op();
+    this.pendingOps = [];
+  }
 }
 
 class IDBTransactionFake {
-  aborted = false;
+  active = true;
   completed = false;
+  aborted = false;
   oncomplete: (() => void) | null = null;
   onabort: (() => void) | null = null;
   onerror: (() => void) | null = null;
@@ -114,14 +146,17 @@ class IDBTransactionFake {
     return this.store;
   }
 
-  abort() {
-    this.aborted = true;
-    this.onabort?.();
+  complete() {
+    this.active = false;
+    this.completed = true;
+    queueMicrotask(() => this.oncomplete?.());
   }
 
-  complete() {
-    this.completed = true;
-    this.oncomplete?.();
+  abort() {
+    this.active = false;
+    this.aborted = true;
+    this.store.rollback();
+    queueMicrotask(() => this.onabort?.());
   }
 }
 
@@ -172,9 +207,7 @@ Object.defineProperty(globalThis, "localStorage", {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function makeEvent(
-  overrides: Partial<AttendanceEvent> = {},
-): AttendanceEvent {
+function makeEvent(overrides: Partial<AttendanceEvent> = {}): AttendanceEvent {
   return {
     eventId: "evt-1",
     eventType: "sign_in",
@@ -237,6 +270,7 @@ describe("clearAttendanceForDataset (D6 data preservation)", () => {
     const error = (await clearAttendanceForDataset("new-dataset").catch(
       (e: unknown) => e as Error,
     )) as Error;
+
     expect(error).toBeInstanceOf(Error);
     expect(error.message).toMatch(/not been acknowledged/);
     expect(error.message).toContain("new-dataset");
@@ -277,40 +311,57 @@ describe("clearAttendanceForDataset (D6 data preservation)", () => {
     expect(
       allIncludingFailed.map((e) => e.eventId).sort(),
     ).toEqual(["evt-failed", "evt-inflight"].sort());
-    expect(allIncludingFailed.find((e) => e.eventId === "evt-failed")?.syncState).toBe("failed");
+    expect(
+      allIncludingFailed.find((e) => e.eventId === "evt-failed")?.syncState,
+    ).toBe("failed");
   });
 
   it("does not reset the dataset identifier while unacknowledged events remain", async () => {
+    localStorageStore.set("gh_attendance_dataset", "old-dataset");
     await saveSignIn(makeRecord("sess-1", [makeEvent({ syncState: "pending" })]));
 
     await expect(clearAttendanceForDataset("new-dataset")).rejects.toThrow();
 
-    // The dataset identifier must not be written while unacknowledged events remain.
-    expect(localStorageStore.has("gh_attendance_dataset")).toBe(false);
+    expect(localStorageStore.get("gh_attendance_dataset")).toBe("old-dataset");
+    expect(localStorageStore.has("gh_attendance_dataset")).toBe(true);
+  });
+
+  it("leaves every record unchanged when the clear is aborted", async () => {
+    const pending = makeEvent({ syncState: "pending", eventId: "evt-pending" });
+    await saveSignIn(makeRecord("sess-1", [pending]));
+    await saveSignIn(makeRecord("sess-2", []));
+
+    await expect(clearAttendanceForDataset("new-dataset")).rejects.toThrow();
+
+    expect(records.size).toBe(2);
+    expect(records.has("sess-1")).toBe(true);
+    expect(records.has("sess-2")).toBe(true);
   });
 
   it("clears acknowledged records and updates the dataset identifier when no unacknowledged events exist", async () => {
-    const acknowledged = makeRecord("sess-1", []);
-    await saveSignIn(acknowledged);
+    await saveSignIn(makeRecord("sess-1", []));
+    await saveSignIn(makeRecord("sess-2", []));
 
     await clearAttendanceForDataset("new-dataset");
 
     const remaining = await getPendingEvents();
     expect(remaining).toHaveLength(0);
+    expect(records.size).toBe(0);
     expect(localStorageStore.get("gh_attendance_dataset")).toBe("new-dataset");
   });
 
-  it("does not delete acknowledged records when any unacknowledged event exists elsewhere", async () => {
+  it("deletes acknowledged records within an active transaction and does not touch unacknowledged records elsewhere", async () => {
     await saveSignIn(makeRecord("sess-ack", []));
     await saveSignIn(makeRecord("sess-pending", [makeEvent({ syncState: "pending" })]));
 
     await expect(clearAttendanceForDataset("new-dataset")).rejects.toThrow();
 
+    // The acknowledged record must survive because the transaction aborted.
+    expect(records.size).toBe(2);
+    expect(records.has("sess-ack")).toBe(true);
+    expect(records.has("sess-pending")).toBe(true);
     const all = await getPendingEvents(true);
     expect(all).toHaveLength(1);
-    // Both records are still stored: nothing was deleted.
-    const storeCount = records.size;
-    expect(storeCount).toBe(2);
   });
 
   it("a repeated/retry clear still does not destroy unacknowledged records", async () => {
@@ -330,11 +381,10 @@ describe("clearAttendanceForDataset (D6 data preservation)", () => {
     await saveSignIn(makeRecord("sess-ack", []));
     await saveSignIn(makeRecord("sess-pending", [makeEvent({ syncState: "pending" })]));
 
-    // Blocked because of the pending event; acknowledged record survives.
     await expect(clearAttendanceForDataset("new-dataset")).rejects.toThrow();
     expect(records.size).toBe(2);
 
-    // Remove the pending event (simulate it being acknowledged/reviewed).
+    // Resolve the pending event, then the clear may proceed.
     await saveSignIn(makeRecord("sess-pending", []));
     await clearAttendanceForDataset("new-dataset");
     expect(records.size).toBe(0);

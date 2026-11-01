@@ -136,8 +136,36 @@ export async function clearAttendanceForDataset(datasetId: string): Promise<void
   const database = await openDatabase();
   try {
     const transaction = database.transaction(RECORDS_STORE, "readwrite");
-    transaction.objectStore(RECORDS_STORE).clear();
-    await transactionDone(transaction);
+    const store = transaction.objectStore(RECORDS_STORE);
+    const done = transactionDone(transaction);
+
+    const allRequest = store.getAll();
+    const records = await new Promise<AttendanceRecord[]>((resolve, reject) => {
+      allRequest.onsuccess = () => resolve(allRequest.result as AttendanceRecord[]);
+      allRequest.onerror = () => reject(allRequest.error ?? new Error("Could not read local attendance records."));
+    });
+
+    // Never destroy unacknowledged attendance events because of a dataset mismatch.
+    // "pending" covers events awaiting sync (including inflight retries);
+    // "failed" covers events rejected by the server / failed review.
+    const unacknowledged = records.flatMap((record) => record.pendingEvents).filter(
+      (event) => event.syncState === "pending" || event.syncState === "failed",
+    );
+
+    if (unacknowledged.length > 0) {
+      // Abort so nothing is deleted, then surface an actionable error.
+      transaction.abort();
+      throw new Error(
+        `Cannot clear dataset "${datasetId}": ${unacknowledged.length} attendance event(s) saved on this device have not been acknowledged by the server. Sync them first, or resolve them in review, then clear again.`,
+      );
+    }
+
+    // Only acknowledged/synced records remain, so it is safe to delete them.
+    for (const record of records) {
+      store.delete(record.sessionRef);
+    }
+
+    await done;
     localStorage.setItem(DATASET_KEY, datasetId);
   } finally {
     database.close();

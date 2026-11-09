@@ -85,6 +85,15 @@ function transactionDone(transaction: IDBTransaction): Promise<void> {
   });
 }
 
+function abortTransaction(transaction: IDBTransaction): void {
+  try {
+    transaction.abort();
+  } catch {
+    // The transaction may already have finished (for example after a request
+    // error). transactionDone() still reports the final outcome.
+  }
+}
+
 export function getAttendanceForDay(dayKey: string): Promise<AttendanceRecord[]> {
   return openDatabase().then((database) => new Promise((resolve, reject) => {
     const transaction = database.transaction(RECORDS_STORE, "readonly");
@@ -132,30 +141,35 @@ export function getStoredAttendanceDatasetId(): string | null {
   return localStorage.getItem(DATASET_KEY);
 }
 
+type ClearScanResult =
+  | { status: "deletions_queued" }
+  | { status: "blocked_by_unacknowledged_events" }
+  | { status: "read_failed"; error: Error };
+
 export async function clearAttendanceForDataset(datasetId: string): Promise<void> {
   const database = await openDatabase();
   try {
     const transaction = database.transaction(RECORDS_STORE, "readwrite");
     const store = transaction.objectStore(RECORDS_STORE);
+    // Register the completion handlers before issuing any request, so this promise
+    // is already observed when the transaction aborts or errors on any path.
     const done = transactionDone(transaction);
 
-    let aborted = false;
-    await new Promise<void>((resolve, reject) => {
+    const result = await new Promise<ClearScanResult>((resolve) => {
       // Scan inside the request callback so the transaction stays active while we
       // decide whether to abort or to queue deletions. This avoids issuing deletes
       // against an inactive transaction after awaiting getAll().
       const allRequest = store.getAll();
       allRequest.onsuccess = () => {
         const records = allRequest.result as AttendanceRecord[];
-        const unacknowledged = records.flatMap((record) => record.pendingEvents).filter(
-          (event) => event.syncState === "pending" || event.syncState === "failed",
-        );
+        const unacknowledged = records
+          .flatMap((record) => record.pendingEvents)
+          .filter((event) => event.syncState === "pending" || event.syncState === "failed");
 
         if (unacknowledged.length > 0) {
           // Block the dataset-mismatch clear: unacknowledged events must never be purged.
-          aborted = true;
-          transaction.abort();
-          resolve();
+          abortTransaction(transaction);
+          resolve({ status: "blocked_by_unacknowledged_events" });
           return;
         }
 
@@ -163,29 +177,46 @@ export async function clearAttendanceForDataset(datasetId: string): Promise<void
         for (const record of records) {
           store.delete(record.sessionRef);
         }
-        resolve();
+        resolve({ status: "deletions_queued" });
       };
-      allRequest.onerror = () => reject(allRequest.error ?? new Error("Could not read local attendance records."));
+      allRequest.onerror = () => {
+        // A failed read cannot clear anything, so abort the still-active readwrite
+        // transaction instead of leaving it to settle on its own.
+        abortTransaction(transaction);
+        resolve({
+          status: "read_failed",
+          error: allRequest.error ?? new Error("Could not read local attendance records."),
+        });
+      };
     });
 
-    // transactionDone rejects when the transaction aborts. Handle that rejection so
-    // the caller always receives the intended D6 error and never an unhandled
-    // promise rejection.
+    // Always await the transaction outcome, including after an aborted read, so
+    // its abort/error rejection is handled rather than left unhandled.
+    let transactionError: Error | null = null;
     try {
       await done;
-    } catch {
-      if (aborted) {
-        throw new Error(
-          `Cannot clear dataset "${datasetId}": unacknowledged attendance event(s) saved on this device have not been acknowledged by the server. Sync them first, or resolve them in review, then clear again.`,
-        );
-      }
+    } catch (error) {
+      transactionError = error instanceof Error ? error : new Error("Could not clear old device data.");
+    }
+
+    // Preserve the actionable D6 error: the transaction was aborted and every
+    // local record was intentionally left untouched.
+    if (result.status === "blocked_by_unacknowledged_events") {
+      throw new Error(
+        `Cannot clear dataset "${datasetId}": unacknowledged attendance event(s) saved on this device have not been acknowledged by the server. Sync them first, or resolve them in review, then clear again.`,
+      );
+    }
+
+    if (result.status === "read_failed") {
+      throw result.error;
+    }
+
+    if (transactionError) {
       throw new Error("Could not clear old device data.");
     }
 
-    // Only rewrite the dataset identifier when the clear actually committed.
-    if (!aborted) {
-      localStorage.setItem(DATASET_KEY, datasetId);
-    }
+    // Only rewrite the dataset identifier once the deletion transaction committed.
+    localStorage.setItem(DATASET_KEY, datasetId);
   } finally {
     database.close();
   }

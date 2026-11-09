@@ -22,6 +22,10 @@ interface StoredRecord extends AttendanceRecord {
 
 let records = new Map<string, StoredRecord>();
 let localStorageStore = new Map<string, string>();
+// Lets a test make the next getAll() request fail, mirroring a storage read
+// error. The fake leaves the transaction active so the caller must abort it.
+let failNextGetAllError: Error | null = null;
+let lastTransaction: IDBTransactionFake | null = null;
 
 class IDBRequestFake<T = unknown> {
   result: T | null = null;
@@ -55,6 +59,12 @@ class IDBObjectStoreFake {
 
   getAll() {
     const req = new IDBRequestFake<StoredRecord[]>();
+    if (failNextGetAllError) {
+      const error = failNextGetAllError;
+      failNextGetAllError = null;
+      req.reject(error);
+      return req;
+    }
     req.resolve(Array.from(records.values()));
     this.complete();
     return req;
@@ -140,6 +150,7 @@ class IDBTransactionFake {
   constructor(store: IDBObjectStoreFake) {
     this.store = store;
     store.tx = this;
+    lastTransaction = this;
   }
 
   objectStore() {
@@ -252,6 +263,8 @@ function makeRecord(
 function resetStore() {
   records = new Map();
   localStorageStore = new Map();
+  failNextGetAllError = null;
+  lastTransaction = null;
 }
 
 beforeEach(() => {
@@ -395,5 +408,64 @@ describe("clearAttendanceForDataset (D6 data preservation)", () => {
     await expect(clearAttendanceForDataset("other-dataset")).rejects.toThrow();
     const stillThere = await getPendingEvents();
     expect(stillThere).toHaveLength(1);
+  });
+
+  it("blocks the clear when only failed-review events remain", async () => {
+    const failed = makeEvent({
+      syncState: "failed",
+      eventId: "evt-failed-only",
+      syncError: "The server did not accept this attendance record.",
+    });
+    await saveSignIn(makeRecord("sess-failed", [failed]));
+
+    const error = (await clearAttendanceForDataset("new-dataset").catch(
+      (e: unknown) => e as Error,
+    )) as Error;
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toMatch(/not been acknowledged/);
+    expect(lastTransaction?.aborted).toBe(true);
+
+    const surviving = await getPendingEvents(true);
+    expect(surviving).toHaveLength(1);
+    expect(surviving[0].eventId).toBe("evt-failed-only");
+    expect(surviving[0].syncState).toBe("failed");
+  });
+
+  it("aborts a failed getAll() read, keeps every record and the dataset id, and leaves no unhandled rejection", async () => {
+    localStorageStore.set("gh_attendance_dataset", "old-dataset");
+    await saveSignIn(makeRecord("sess-ack", []));
+    await saveSignIn(makeRecord("sess-pending", [makeEvent({ syncState: "pending" })]));
+
+    const unhandled: unknown[] = [];
+    const onUnhandledRejection = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandledRejection);
+
+    try {
+      failNextGetAllError = new Error("Disk read failed while scanning local attendance.");
+
+      const error = (await clearAttendanceForDataset("new-dataset").catch(
+        (e: unknown) => e as Error,
+      )) as Error;
+
+      expect(error).toBeInstanceOf(Error);
+      expect(error.message).toMatch(/Disk read failed/);
+
+      // Give the microtask/timer queues a turn so a leaked rejection surfaces.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(unhandled).toEqual([]);
+      expect(lastTransaction?.aborted).toBe(true);
+      expect(lastTransaction?.completed).toBe(false);
+      expect(localStorageStore.get("gh_attendance_dataset")).toBe("old-dataset");
+      expect(records.size).toBe(2);
+    } finally {
+      process.off("unhandledRejection", onUnhandledRejection);
+    }
+
+    // The data is still readable after the failed clear, including the pending event.
+    const surviving = await getPendingEvents(true);
+    expect(surviving).toHaveLength(1);
+    expect(surviving[0].syncState).toBe("pending");
   });
 });

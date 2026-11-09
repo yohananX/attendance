@@ -4,6 +4,9 @@ import fs from "fs";
 import path from "path";
 
 const DATABASE_URL = process.env.DATABASE_URL;
+// Shared with tests/ingest-integration.test.ts: vitest runs test files in
+// parallel, and concurrent DDL against one database races.
+const MIGRATION_LOCK = 8123456;
 const migrationSql = fs.readFileSync(
   path.resolve("supabase/migrations/20261031000000_initial_schema.sql"),
   "utf8",
@@ -17,7 +20,12 @@ describe.skipIf(!DATABASE_URL)(
     beforeAll(async () => {
       client = new Client({ connectionString: DATABASE_URL });
       await client.connect();
-      await client.query(migrationSql);
+      await client.query("SELECT pg_advisory_lock($1)", [MIGRATION_LOCK]);
+      try {
+        await client.query(migrationSql);
+      } finally {
+        await client.query("SELECT pg_advisory_unlock($1)", [MIGRATION_LOCK]);
+      }
     });
 
     afterAll(async () => {
@@ -69,9 +77,13 @@ describe.skipIf(!DATABASE_URL)(
     });
 
     it("events append-only: UPDATE and DELETE fail at the data layer", async () => {
+      const { rows: sessions } = await client.query<{ session_ref: string }>(
+        "INSERT INTO sessions (session_ref, day_key, student_name, parent_phone) VALUES (gen_random_uuid(), CURRENT_DATE, 'A Child', '+2348012345678') RETURNING session_ref",
+      );
       await client.query(
-        `INSERT INTO events (event_id, event_type, session_ref, student_name, parent_phone, device_event_at, device_id, device_seq, staff_name, day_key)
-         VALUES (gen_random_uuid(), 'sign_in', gen_random_uuid(), 'A Child', '+2348012345678', now(), gen_random_uuid(), 1, 'Staff', CURRENT_DATE)`,
+        `INSERT INTO events (event_id, event_type, session_ref, student_name, parent_phone, device_event_at, queued_duration, device_id, device_seq, staff_name, day_key)
+         VALUES (gen_random_uuid(), 'sign_in', $1, 'A Child', '+2348012345678', now(), interval '0', gen_random_uuid(), 1, 'Staff', CURRENT_DATE)`,
+        [sessions[0].session_ref],
       );
       await expect(client.query("UPDATE events SET conflict_marker = 'losing'")).rejects.toThrow();
       await expect(client.query("DELETE FROM events")).rejects.toThrow();
@@ -151,12 +163,16 @@ describe.skipIf(!DATABASE_URL)(
       expect(byKey["future_tolerance_minutes"]).toBe("5");
     });
 
-    it("health_privilege_check returns true for service_role, false for anon", async () => {
+    it("health_privilege_check reports whether the connected role is the privileged service role", async () => {
+      const { rows: role } = await client.query<{ current_user: string }>("SELECT current_user");
       const { rows } = await client.query<{ health_privilege_check: boolean }>(
         "SELECT health_privilege_check() AS health_privilege_check",
       );
       expect(typeof rows[0].health_privilege_check).toBe("boolean");
-      expect(rows[0].health_privilege_check).toBe(true);
+      // Honest probe: true only for service_role. A plain PostgreSQL test
+      // database connects as a superuser, which the probe correctly reports as
+      // not being the Supabase service role.
+      expect(rows[0].health_privilege_check).toBe(role[0].current_user === "service_role");
     });
 
     it("sanctioned correction path updates sessions and writes an append-only audit row", async () => {
@@ -191,8 +207,8 @@ describe.skipIf(!DATABASE_URL)(
       const sessionRef = rows[0].session_ref;
       const insertSignOut = (marker: string) =>
         client.query(
-          `INSERT INTO events (event_id, event_type, session_ref, student_name, parent_phone, device_event_at, device_id, device_seq, staff_name, day_key, conflict_marker, ingest_result)
-           VALUES (gen_random_uuid(), 'sign_out', $1, 'A Child', '+2348012345678', now(), gen_random_uuid(), 1, 'Staff', CURRENT_DATE, $2, 'accepted')`,
+          `INSERT INTO events (event_id, event_type, session_ref, student_name, parent_phone, device_event_at, queued_duration, device_id, device_seq, staff_name, day_key, conflict_marker, ingest_result)
+           VALUES (gen_random_uuid(), 'sign_out', $1, 'A Child', '+2348012345678', now(), interval '0', gen_random_uuid(), 1, 'Staff', CURRENT_DATE, $2, 'accepted')`,
           [sessionRef, marker],
         );
 
@@ -204,12 +220,16 @@ describe.skipIf(!DATABASE_URL)(
       await insertSignOut("losing");
     });
 
-    it("health_privilege_check returns true for service_role, false for anon", async () => {
+    it("health_privilege_check reports whether the connected role is the privileged service role", async () => {
+      const { rows: role } = await client.query<{ current_user: string }>("SELECT current_user");
       const { rows } = await client.query<{ health_privilege_check: boolean }>(
         "SELECT health_privilege_check() AS health_privilege_check",
       );
       expect(typeof rows[0].health_privilege_check).toBe("boolean");
-      expect(rows[0].health_privilege_check).toBe(true);
+      // Honest probe: true only for service_role. A plain PostgreSQL test
+      // database connects as a superuser, which the probe correctly reports as
+      // not being the Supabase service role.
+      expect(rows[0].health_privilege_check).toBe(role[0].current_user === "service_role");
     });
   },
 );

@@ -60,7 +60,7 @@ BEGIN
   -- mutation for this transaction (see sessions_authorize_mutation). This is
   -- the AC-30.4 guardrail: only projection apply, audited correction, launch
   -- marker and conflict flagging may change displayed session state.
-  IF current_setting('app.session_mutation_authorized', true) IS NOT 'true' THEN
+  IF current_setting('app.session_mutation_authorized', true) IS DISTINCT FROM 'true' THEN
     RAISE EXCEPTION 'sessions is not directly updatable: use sanctioned projection/correction/marker paths';
   END IF;
   RETURN NEW;
@@ -280,8 +280,9 @@ RETURNS integer
 LANGUAGE plpgsql
 AS $$
 DECLARE
-  v_current_version integer;
-  v_old_value       timestamptz;
+  v_current_version     integer;
+  v_old_value           timestamptz;
+  v_correction_event_id uuid;
 BEGIN
   PERFORM sessions_authorize_mutation('correction');
 
@@ -301,10 +302,22 @@ BEGIN
     UPDATE sessions SET conflict_type = 'correction_conflict',
                         needs_review = true
     WHERE session_ref = p_session_ref;
+    -- Retain the unapplied correction as an append-only event so the audit row
+    -- references a real event (corrections.correction_event_id is a FK).
+    INSERT INTO events (event_id, event_type, session_ref, student_name, parent_phone,
+                        device_event_at, server_received_at, queued_duration,
+                        captured_offline, device_id, device_seq, staff_name,
+                        day_key, conflict_marker, ingest_result)
+    SELECT gen_random_uuid(), 'correction', p_session_ref, s.student_name, s.parent_phone,
+           p_new_value, now(), interval '0', false,
+           gen_random_uuid(), 1, p_edited_by, s.day_key, 'rejected', 'conflict'
+    FROM sessions s WHERE s.session_ref = p_session_ref
+    RETURNING event_id INTO v_correction_event_id;
+
     INSERT INTO corrections (correction_event_id, session_ref, field, original_value,
                              new_value, base_value, base_server_version, applied,
                              conflict_id, edited_by)
-    VALUES (gen_random_uuid(), p_session_ref, p_field,
+    VALUES (v_correction_event_id, p_session_ref, p_field,
             to_char(v_old_value, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
             to_char(p_new_value, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
             to_char(v_old_value, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
@@ -331,12 +344,13 @@ BEGIN
   SELECT gen_random_uuid(), 'correction', p_session_ref, s.student_name, s.parent_phone,
          p_new_value, now(), interval '0', false,
          gen_random_uuid(), 1, p_edited_by, s.day_key, 'none', 'accepted'
-  FROM sessions s WHERE s.session_ref = p_session_ref;
+  FROM sessions s WHERE s.session_ref = p_session_ref
+  RETURNING event_id INTO v_correction_event_id;
 
   INSERT INTO corrections (correction_event_id, session_ref, field, original_value,
                            new_value, base_value, base_server_version, applied,
                            conflict_id, edited_by)
-  VALUES (gen_random_uuid(), p_session_ref, p_field,
+  VALUES (v_correction_event_id, p_session_ref, p_field,
           to_char(v_old_value, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
           to_char(p_new_value, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
           to_char(v_old_value, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),

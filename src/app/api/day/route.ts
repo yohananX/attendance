@@ -18,8 +18,10 @@ import { getAttendanceDatasetId } from "@/lib/attendance-dataset";
 
 interface SessionRow {
   session_ref: string;
-  student_name: string;
-  parent_phone: string;
+  // Null only for a provisional session (a sign-out that arrived before its
+  // sign-in, PD-D3): identity is never invented for one.
+  student_name: string | null;
+  parent_phone: string | null;
   day_key: string;
   signed_in_at: string | null;
   signed_out_at: string | null;
@@ -30,13 +32,14 @@ interface SessionRow {
   conflict_type: string | null;
   late_synced: boolean;
   needs_review: boolean;
+  provisional: boolean;
   whatsapp_launched_at: string | null;
 }
 
 interface SessionSnapshot {
   sessionRef: string;
-  studentName: string;
-  parentPhone: string;
+  studentName: string | null;
+  parentPhone: string | null;
   dayKey: string;
   signedInAt: string | null;
   signedOutAt: string | null;
@@ -47,12 +50,13 @@ interface SessionSnapshot {
   conflictType: string | null;
   lateSynced: boolean;
   needsReview: boolean;
+  provisional: boolean;
   whatsappLaunchedAt: string | null;
 }
 
 interface OutstandingMessage {
   sessionRef: string;
-  studentName: string;
+  studentName: string | null;
   whatsappLaunchedAt: string | null;
 }
 
@@ -87,6 +91,7 @@ function mapSession(row: SessionRow): SessionSnapshot {
     conflictType: row.conflict_type,
     lateSynced: row.late_synced,
     needsReview: row.needs_review,
+    provisional: row.provisional,
     whatsappLaunchedAt: row.whatsapp_launched_at,
   };
 }
@@ -134,7 +139,8 @@ export async function GET(req: Request): Promise<Response> {
     .select(
       "session_ref, student_name, parent_phone, day_key, signed_in_at, " +
         "signed_out_at, signed_in_by, signed_out_by, server_version, " +
-        "corrected, conflict_type, late_synced, needs_review, whatsapp_launched_at",
+        "corrected, conflict_type, late_synced, needs_review, provisional, " +
+        "whatsapp_launched_at",
     )
     .eq("day_key", dayKey)
     .order("signed_in_at", { ascending: false });

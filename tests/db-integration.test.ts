@@ -163,16 +163,17 @@ describe.skipIf(!DATABASE_URL)(
       expect(byKey["future_tolerance_minutes"]).toBe("5");
     });
 
-    it("health_privilege_check reports whether the connected role is the privileged service role", async () => {
+    it("health_privilege_check reports the current database role for the privileged-capability probe", async () => {
       const { rows: role } = await client.query<{ current_user: string }>("SELECT current_user");
-      const { rows } = await client.query<{ health_privilege_check: boolean }>(
+      const { rows } = await client.query<{ health_privilege_check: string }>(
         "SELECT health_privilege_check() AS health_privilege_check",
       );
-      expect(typeof rows[0].health_privilege_check).toBe("boolean");
-      // Honest probe: true only for service_role. A plain PostgreSQL test
-      // database connects as a superuser, which the probe correctly reports as
-      // not being the Supabase service role.
-      expect(rows[0].health_privilege_check).toBe(role[0].current_user === "service_role");
+      expect(typeof rows[0].health_privilege_check).toBe("string");
+      // Honest probe: returns the current role. /api/health treats any role
+      // other than anon as privileged; a plain PostgreSQL test connection runs
+      // as a superuser, so the reported role is that superuser (not "anon" and
+      // not necessarily "service_role").
+      expect(rows[0].health_privilege_check).toBe(role[0].current_user);
     });
 
     it("sanctioned correction path updates sessions and writes an append-only audit row", async () => {
@@ -220,16 +221,17 @@ describe.skipIf(!DATABASE_URL)(
       await insertSignOut("losing");
     });
 
-    it("health_privilege_check reports whether the connected role is the privileged service role", async () => {
+    it("health_privilege_check reports the current database role for the privileged-capability probe", async () => {
       const { rows: role } = await client.query<{ current_user: string }>("SELECT current_user");
-      const { rows } = await client.query<{ health_privilege_check: boolean }>(
+      const { rows } = await client.query<{ health_privilege_check: string }>(
         "SELECT health_privilege_check() AS health_privilege_check",
       );
-      expect(typeof rows[0].health_privilege_check).toBe("boolean");
-      // Honest probe: true only for service_role. A plain PostgreSQL test
-      // database connects as a superuser, which the probe correctly reports as
-      // not being the Supabase service role.
-      expect(rows[0].health_privilege_check).toBe(role[0].current_user === "service_role");
+      expect(typeof rows[0].health_privilege_check).toBe("string");
+      // Honest probe: returns the current role. /api/health treats any role
+      // other than anon as privileged; a plain PostgreSQL test connection runs
+      // as a superuser, so the reported role is that superuser (not "anon" and
+      // not necessarily "service_role").
+      expect(rows[0].health_privilege_check).toBe(role[0].current_user);
     });
   },
 );

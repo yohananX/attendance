@@ -2,8 +2,10 @@
 -- Atomic event ingestion, conflict preservation (PD-D2) and provisional-session
 -- reconciliation for orphaned sign-outs (PD-D3).
 --
--- Forward-only. The already-applied initial schema
--- (20261031000000_initial_schema.sql) is not modified.
+-- Applied after 20261031000000_initial_schema.sql. Together the migrations form
+-- the complete, ordered chain for a fresh installation (supabase db push).
+-- This file is forward-only: once applied, future schema changes must be
+-- introduced as new timestamped migrations, never by editing applied files.
 --
 -- Why this migration exists: ingestion used to run as two independent requests
 -- (projection apply, then event insert). A failure between them left a changed

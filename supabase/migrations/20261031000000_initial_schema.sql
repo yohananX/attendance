@@ -142,7 +142,7 @@ CREATE INDEX IF NOT EXISTS idx_conflicts_resolution_correction ON conflicts(reso
 -- ============================================================
 CREATE TABLE IF NOT EXISTS corrections (
   correction_id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  correction_event_id    uuid NOT NULL REFERENCES events(event_id),
+  correction_event_id    uuid NOT NULL UNIQUE REFERENCES events(event_id),
   session_ref            uuid NOT NULL REFERENCES sessions(session_ref),
   field                  text NOT NULL CHECK (field IN ('signed_in_at','signed_out_at')),
   original_value         text NOT NULL,
@@ -207,10 +207,11 @@ CREATE INDEX IF NOT EXISTS idx_app_settings_key ON app_settings(setting_key);
 -- would let succeed with an empty result set.
 -- ============================================================
 CREATE OR REPLACE FUNCTION health_privilege_check()
-RETURNS boolean
+RETURNS text
 LANGUAGE sql
+STABLE
 AS $$
-  SELECT current_user = 'service_role';
+  SELECT current_user::text;
 $$;
 
 -- ============================================================

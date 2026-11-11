@@ -200,8 +200,8 @@ export default function DayReview() {
           <tbody>
             {records.map((record) => (
               <tr key={record.sessionRef}>
-                <td>{record.studentName}</td>
-                <td>{record.parentPhone}</td>
+                <td>{record.studentName ?? "Identity not yet confirmed"}</td>
+                <td>{record.parentPhone ?? "—"}</td>
                 <td>{formatTime(record.signedInAt)}</td>
                 <td>{formatTime(record.signedOutAt)}</td>
               </tr>

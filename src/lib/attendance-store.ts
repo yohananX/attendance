@@ -19,8 +19,10 @@ export interface AttendanceEvent {
 
 export interface AttendanceRecord {
   sessionRef: string;
-  studentName: string;
-  parentPhone: string;
+  // Null for a provisional server session (sign-out synced before its sign-in,
+  // PD-D3). The device never invents a name or phone number for one.
+  studentName: string | null;
+  parentPhone: string | null;
   dayKey: string;
   signedInAt: string | null;
   signedOutAt: string | null;
@@ -31,6 +33,7 @@ export interface AttendanceRecord {
   conflictType: string | null;
   lateSynced: boolean;
   needsReview: boolean;
+  provisional?: boolean;
   whatsappLaunchedAt: string | null;
   pendingEvents: AttendanceEvent[];
   syncError: string | null;
@@ -38,8 +41,8 @@ export interface AttendanceRecord {
 
 interface ServerRecord {
   sessionRef: string;
-  studentName: string;
-  parentPhone: string;
+  studentName: string | null;
+  parentPhone: string | null;
   dayKey: string;
   signedInAt: string | null;
   signedOutAt: string | null;
@@ -50,6 +53,7 @@ interface ServerRecord {
   conflictType: string | null;
   lateSynced: boolean;
   needsReview: boolean;
+  provisional?: boolean;
   whatsappLaunchedAt: string | null;
 }
 
@@ -362,10 +366,61 @@ export async function getPendingEvents(
   }
 }
 
+/** Session projection returned with a per-event acknowledgement (API contract §4.2). */
+export interface AcknowledgedProjection {
+  sessionRef: string;
+  studentName: string | null;
+  parentPhone: string | null;
+  dayKey: string;
+  signedInAt: string | null;
+  signedOutAt: string | null;
+  signedInBy: string | null;
+  signedOutBy: string | null;
+  serverVersion: number;
+  corrected: boolean;
+  conflictType: string | null;
+  lateSynced: boolean;
+  needsReview: boolean;
+  provisional?: boolean;
+  whatsappLaunchedAt: string | null;
+}
+
+function applyServerProjection(
+  record: AttendanceRecord,
+  projection: AcknowledgedProjection,
+): AttendanceRecord {
+  return {
+    ...record,
+    sessionRef: projection.sessionRef,
+    studentName: projection.studentName,
+    parentPhone: projection.parentPhone,
+    dayKey: projection.dayKey,
+    signedInAt: projection.signedInAt,
+    signedOutAt: projection.signedOutAt,
+    signedInBy: projection.signedInBy,
+    signedOutBy: projection.signedOutBy,
+    serverVersion: projection.serverVersion,
+    corrected: projection.corrected,
+    conflictType: projection.conflictType,
+    lateSynced: projection.lateSynced,
+    needsReview: projection.needsReview,
+    provisional: projection.provisional ?? record.provisional ?? false,
+    whatsappLaunchedAt: projection.whatsappLaunchedAt ?? record.whatsappLaunchedAt,
+  };
+}
+
+/**
+ * Apply a per-event acknowledgement: the server projection and the removal of
+ * the acknowledged event are written in ONE transaction, so a crash cannot
+ * drop an event that was retained on the server without applying its result.
+ * `accepted` covers `accepted`, `duplicate` and `conflict` acknowledgements —
+ * a conflict is a retained event, not a rejection.
+ */
 export async function updatePendingEvent(
   eventId: string,
   accepted: boolean,
   errorMessage?: string,
+  projection?: AcknowledgedProjection | null,
 ): Promise<void> {
   const database = await openDatabase();
   const transaction = database.transaction(RECORDS_STORE, "readwrite");
@@ -376,8 +431,14 @@ export async function updatePendingEvent(
       const event = record.pendingEvents.find((item) => item.eventId === eventId);
       if (!event) continue;
       if (accepted) {
-        record.pendingEvents = record.pendingEvents.filter((item) => item.eventId !== eventId);
-        record.syncError = null;
+        const remaining = record.pendingEvents.filter((item) => item.eventId !== eventId);
+        // Apply the canonical projection, then re-overlay this device's still
+        // unacknowledged events for display (FR-17.1).
+        const base = projection ? applyServerProjection(record, projection) : record;
+        const overlaid = applyPendingEvents(base, remaining);
+        Object.assign(record, overlaid, { pendingEvents: remaining, syncError: null });
+        store.put(record);
+        break;
       } else {
         event.syncState = "failed";
         event.syncError = errorMessage ?? "The server did not accept this attendance record.";

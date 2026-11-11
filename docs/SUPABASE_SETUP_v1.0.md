@@ -1,47 +1,140 @@
-# Supabase setup (T1.2) — v1.0
+# Supabase setup — migrations, reset and clean install
 
-This document explains how to configure a **non-production** Supabase project for the Grace House Attendance app and apply the initial schema migration.
+This document describes the corrected Grace House database migration chain, the
+intended (approved but not yet executed/verified) database reset, and the normal
+installation procedure.
 
-> **Do not** commit credentials. `.env.local` is gitignored. Only add secrets to Vercel Environment Variables for deployed environments.
+> **Credentials:** never commit `.env.local` or secrets. Only add secrets to
+> Vercel Environment Variables for deployed environments. The browser never
+> talks to Supabase directly.
 
-## 1) Create a Supabase project (non-production)
-1. Go to [supabase.com](https://supabase.com) and create a new project. Use a separate project for dev/staging (not production) while validating.
-2. Note the **Project URL** and **Service role key** (Settings → API). The service role key is privileged and must never reach the browser.
+## 1) Migration chain (authoritative, in order)
 
-## 2) Configure environment variables
-Copy `.env.example` to `.env.local` and fill in:
+| Version | File | Purpose |
+|---|---|---|
+| `20261031000000` | `supabase/migrations/20261031000000_initial_schema.sql` | Authoritative initial schema: sessions/events/conflicts/corrections/login_attempts/app_settings, RLS enabled with **no policies**, append-only guards, sessions mutability guard and sanctioned mutation paths, PD-D1 settings, PD-D2 partial unique indexes, health privilege probe. |
+| `20261109000000` | `supabase/migrations/20261109000000_atomic_event_ingest.sql` | Phase 0 D1/D8: provisional sessions + reconciliation (PD-D3), projection snapshot, and atomic `ingest_attendance_event` (transaction advisory lock, idempotency, conflict retention/audit, projection and review flags committed together). |
 
-- `SUPABASE_URL` — e.g. `https://<project-ref>.supabase.co` (https required; http only allowed for local Supabase CLI on localhost)
-- `SUPABASE_SERVICE_ROLE_KEY` — service role key (server-only)
-- `SESSION_SECRET` — generate with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`
-- `STAFF_PIN` — minimum 6 digits (verified server-side only)
-- `SCHOOL_NAME` — e.g. `Grace House School`
+Apply them **in order** with the normal Supabase workflow. On a genuinely empty
+database this produces the complete intended schema.
 
-For Vercel: Project → Settings → Environment Variables. Add the same values; mark secrets as sensitive. Do **not** prefix with `NEXT_PUBLIC_`.
+### Corrected initial migration (20261031000000)
 
-## 3) Apply the migration
-The migration is at `supabase/migrations/20261031000000_initial_schema.sql`. 
+`20261031000000_initial_schema.sql` is the authoritative baseline for future
+fresh installations. It corrects defects that existed in earlier revisions of
+that file, including:
 
-Options:
-- **Supabase SQL Editor** (easiest): Open the SQL Editor in your Supabase project and paste/run the migration contents. Run once against an empty database.
-- **Supabase CLI** (if using local/linked project): `supabase db push` or apply the migration file as appropriate for your setup.
+- the sessions mutability guard now uses the valid null-safe comparison
+  `current_setting('app.session_mutation_authorized', true) IS DISTINCT FROM 'true'`
+  (the previous `IS NOT 'true'` form is not valid PL/pgSQL and prevented the
+  baseline from applying);
+- `sessions_apply_correction` inserts the correction event first and records its
+  real `event_id` in `corrections.correction_event_id` (a foreign key to
+  `events`) in both the applied and version-conflict branches, so correction
+  audit rows can be written;
+- `health_privilege_check()` returns the current database role as `text`; the
+  `/api/health` privileged-capability probe requires it to equal exactly
+  `service_role` (`dbReady: true` only for that role, with a healthy probe);
+- `corrections.correction_event_id` is unique, consistent with the database
+  contract.
 
-After applying, all five tables will exist with RLS enabled and **no policies** (only the service role can access). The `events` table has append-only triggers.
+## 2) Database reset (intended/approved, not yet executed — owner-executed only)
 
-## 4) Verify
-1. Start the dev server: `npm run dev`
-2. Check the health endpoint. `/api/health` is now **operator-authenticated**: it requires an `x-health-secret` header matching `HEALTH_CHECK_SECRET` (set in `.env.local` / Vercel env vars), otherwise it returns `401`. With a valid secret it returns `{ "ok": true, "serverTime": "...", "dbReady": true/false }`. `dbReady` is `true` only when the connectivity probe succeeds **and** a privileged-capability check confirms the call runs as the service role (not the anon key). Without Supabase credentials it returns `dbReady: false` / `503`.
-   ```powershell
-   # Example (replace <secret> with your HEALTH_CHECK_SECRET):
-   curl http://localhost:3000/api/health -H "x-health-secret: <secret>"
+**Project decision:** the existing Supabase database is to be cleared and rebuilt
+from the corrected migration chain. This reset is **intended and approved** but
+**has not yet been executed or verified**. It is a destructive operation on
+attendance data and must be performed only by the owner, with explicit
+confirmation. **Back up/export any data that must be retained before
+proceeding.**
+
+**Do not run these steps automatically.** Prepare and verify the migrations
+first; the owner executes the reset.
+
+### Exact reset procedure (owner)
+
+1. **Export/backup first** if any data must be retained. End-of-term/operational
+   exports are an owner responsibility outside the app; confirm the backup before
+   proceeding.
+2. In the Supabase Dashboard for the target project, reset/clear the database so
+   it is genuinely empty (no application tables, no prior
+   `supabase_migrations.schema_migrations` history for this app), or provision a
+   fresh empty database/project. (Use the Dashboard’s supported reset/provision
+   flow for your project; the exact UI action depends on the project plan.)
+3. From a linked checkout of this repository, apply the complete chain with the
+   normal CLI workflow:
+
+   ```bash
+   supabase link --project-ref <PROJECT_REF>
+   supabase db push
    ```
-3. Check build: `npm run typecheck && npm run build`
 
-## Migration notes
-The migration seeds `app_settings` with PD-D1/Q5 configuration defaults (`late_sync_window_days = 7`, `clock_tolerance_minutes = 5`, `future_tolerance_minutes = 5`). These are **configuration, never hard-coded**; adjust `app_settings` rather than editing the migration when thresholds change.
+   For a non-linked local disposable database, the equivalent is
+   `supabase db push --db-url <postgres-connection-string>`.
 
-## Notes
-...
-- The browser never talks to Supabase directly. All access is server-side via `src/lib/supabase/server.ts` using the service role key.
-- Never commit `.env.local` or credentials.
-- Do **not** apply migrations to production without explicit approval and verification.
+4. Confirm both migrations are recorded:
+
+   ```sql
+   select version, name
+   from supabase_migrations.schema_migrations
+   order by version;
+   -- expect 20261031000000, 20261109000000
+   ```
+
+5. Verify the application: `GET /api/health` with a valid `x-health-secret`
+   reports `dbReady: true`, and a test sign-in/sign-out/correction behaves as
+   expected.
+
+## 3) Clean installation procedure (future / non-production)
+
+1. Create a Supabase project (dev/staging, not production) or start a local
+   Supabase/PostgreSQL instance.
+2. Configure environment variables (copy `.env.example` to `.env.local`):
+   `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SESSION_SECRET`,
+   `HEALTH_CHECK_SECRET`, `STAFF_PIN`, `SCHOOL_NAME`,
+   `ATTENDANCE_DATASET_ID`.
+3. Apply the migration chain against the **empty** database:
+
+   ```bash
+   supabase db push            # linked project
+   # or: supabase db push --db-url <url>
+   ```
+
+   Do **not** hand-create tables/functions, do **not** disable PostgreSQL
+   validation, and do **not** fabricate or bypass migration history.
+4. Verify:
+
+   ```bash
+   npm run dev
+   # /api/health with x-health-secret: <HEALTH_CHECK_SECRET> -> ok/dbReady true
+   npm run typecheck && npm run build
+   ```
+
+## 4) Verification checklist (post-install / post-reset)
+
+- Tables: `sessions`, `events`, `conflicts`, `corrections`, `login_attempts`,
+  `app_settings` exist; `sessions.provisional` and
+  `sessions_identity_required_unless_provisional` exist; ingest objects exist
+  (`ingest_attendance_event`, `session_projection_snapshot`).
+- RLS enabled on every data table with **no policies**.
+- Append-only triggers on `events`, `corrections`, `conflicts`; sessions guarded
+  by `sessions_no_direct_update` / `sessions_mutability_guard`.
+- PD-D2 partial unique indexes on accepted sign-in/sign-out per session.
+- `app_settings` seeded with PD-D1 defaults (`late_sync_window_days=7`,
+  `clock_tolerance_minutes=5`, `future_tolerance_minutes=5`).
+- `sessions_apply_correction` writes a real correction event and a referencing
+  audit row (applied and version-conflict paths).
+- `ingest_attendance_event` commits event, conflict audit and projection
+  atomically and is idempotent on `event_id`.
+
+## 5) Future schema changes
+
+- Introduce every change as a **new, timestamped, forward-only** migration in
+  `supabase/migrations/`. Never edit a migration that has been applied to any
+  environment.
+- Preserve append-only guarantees, RLS/no-policy posture, sanctioned session
+  mutation paths, PD-D2/PD-D3 semantics, idempotency, conflict retention and
+  audit integrity.
+- Test new migrations against a genuinely empty database (full chain) and
+  against a database at the previous applied state before promoting them.
+- Do **not** apply migrations to production without explicit approval and a
+  verified backup/export.

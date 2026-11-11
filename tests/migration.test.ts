@@ -6,6 +6,10 @@ const MIGRATION = fs.readFileSync(
   path.resolve("supabase/migrations/20261031000000_initial_schema.sql"),
   "utf8",
 );
+const ATOMIC_MIGRATION = fs.readFileSync(
+  path.resolve("supabase/migrations/20261109000000_atomic_event_ingest.sql"),
+  "utf8",
+);
 
 describe("migration SQL content", () => {
   it("creates all five contract tables plus the PD-D1 settings table", () => {
@@ -38,7 +42,7 @@ describe("migration SQL content", () => {
   it("sessions mutability guardrail is GUC-based so sanctioned paths can write", () => {
     expect(MIGRATION).toContain("CREATE TRIGGER sessions_no_direct_update");
     expect(MIGRATION).toContain("session_mutation_authorized");
-    expect(MIGRATION).toContain("IS NOT 'true'");
+    expect(MIGRATION).toContain("IS DISTINCT FROM 'true'");
     expect(MIGRATION).toContain("sessions_mutability_guard");
   });
 
@@ -78,5 +82,25 @@ describe("migration SQL content", () => {
   it("exposes health_privilege_check RPC for H2 privileged-capability probe", () => {
     expect(MIGRATION).toContain("CREATE OR REPLACE FUNCTION health_privilege_check");
     expect(MIGRATION).toContain("SELECT current_user");
+  });
+});
+
+describe("atomic ingest migration", () => {
+  it("declares one transaction that owns the event, conflict audit and projection", () => {
+    expect(ATOMIC_MIGRATION).toContain("CREATE OR REPLACE FUNCTION ingest_attendance_event(");
+    expect(ATOMIC_MIGRATION).toContain("pg_advisory_xact_lock");
+    expect(ATOMIC_MIGRATION).toContain("sessions_authorize_mutation('projection')");
+    expect(ATOMIC_MIGRATION).toContain("INSERT INTO conflicts");
+    expect(ATOMIC_MIGRATION).toContain("'losing'");
+  });
+
+  it("adds provisional sessions without weakening identity for real sessions", () => {
+    expect(ATOMIC_MIGRATION).toContain(
+      "ADD COLUMN IF NOT EXISTS provisional boolean NOT NULL DEFAULT false",
+    );
+    expect(ATOMIC_MIGRATION).toContain("sessions_identity_required_unless_provisional");
+    expect(ATOMIC_MIGRATION).toContain(
+      "CHECK (provisional OR (student_name IS NOT NULL AND parent_phone IS NOT NULL))",
+    );
   });
 });

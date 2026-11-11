@@ -3,10 +3,9 @@
  *
  * Accepts a batch of sign_in / sign_out events, authenticates via the session
  * cookie (reusing T3's session validation from @/lib/session), validates each
- * event (schema, parentPhone normalisation, acceptance window), applies the
- * sanctioned projection via sessions_apply_projection(), inserts an append-only
- * event row, and returns one per-event result (accepted / duplicate / rejected
- * / conflict).
+ * event (schema, parentPhone normalisation, acceptance window), and commits it
+ * through the sanctioned atomic ingest RPC, returning one per-event result
+ * (accepted / duplicate / rejected / conflict).
  *
  * Pipeline per API_CONTRACT_v1.0.md §4 / DATABASE_CONTRACT_v1.0.md §3:
  *   1. Session cookie validation — invalid cookie stops the whole request (401).
@@ -14,17 +13,18 @@
  *   3. Per event: schema validation → parentPhone normalisation (FR-06) →
  *      acceptance window (server-recomputed Lagos dayKey, future tolerance,
  *      late-sync window from app_settings — PD-D1, configurable, never
- *      hard-coded) → idempotency lookup on eventId → sanctioned projection via
- *      sessions_apply_projection() → event row insert.
+ *      hard-coded) → one atomic ingest transaction (idempotency, conflict
+ *      classification and audit, event insert, projection, review flags).
  *
  * HTTP 200 whenever the batch was authenticated and well-formed; every event
  * carries a per-event result. Partial failure is per-event, never
  * all-or-nothing (architecture §5.5).
  *
  * The sessions table mutability guard blocks direct UPDATEs, so projection
- * writes go only through sessions_apply_projection() (see
- * src/lib/supabase/rpc.ts). PD-D2 partial unique indexes defend against a
- * second accepted sign_in/sign_out per session.
+ * writes go only through ingest_attendance_event() (see
+ * src/lib/supabase/rpc.ts), which sets the sanctioned mutation GUC inside the
+ * same transaction that inserts the event. A database failure therefore never
+ * leaves a projection change without its event: it rolls both back.
  */
 
 export const dynamic = "force-dynamic";
@@ -32,7 +32,10 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 
 import { getServerSupabaseClient, SupabaseConfigError } from "@/lib/supabase/server";
-import { applySessionProjection } from "@/lib/supabase/rpc";
+import {
+  ingestAttendanceEvent,
+  type IngestSessionSnapshot,
+} from "@/lib/supabase/rpc";
 import { getStaffName, lagosDateKey, lagosDayDifference } from "@/lib/session";
 import { normalizePhone } from "@/lib/phone";
 import { getAttendanceDatasetId } from "@/lib/attendance-dataset";
@@ -42,35 +45,46 @@ const MAX_BATCH_BYTES = 128 * 1024;
 
 type EventResultStatus = "accepted" | "duplicate" | "rejected" | "conflict";
 
+/** Conflict evidence attached to a `conflict` acknowledgement (API contract §4.2). */
+interface EventConflict {
+  conflictId: string;
+  type: string;
+  winningEventId: string | null;
+  losingEventIds: string[];
+}
+
+/** Canonical session projection snapshot in the client-facing camelCase shape. */
+interface ProjectionSnapshot {
+  sessionRef: string;
+  studentName: string | null;
+  parentPhone: string | null;
+  dayKey: string;
+  signedInAt: string | null;
+  signedOutAt: string | null;
+  signedInBy: string | null;
+  signedOutBy: string | null;
+  serverVersion: number;
+  corrected: boolean;
+  conflictType: string | null;
+  lateSynced: boolean;
+  needsReview: boolean;
+  provisional: boolean;
+  whatsappLaunchedAt: string | null;
+}
+
 interface EventResult {
   eventId: string;
   result: EventResultStatus;
   reason?: string;
   message?: string;
   serverReceivedAt?: string;
-  projection?: Record<string, unknown> | null;
+  projection?: ProjectionSnapshot | null;
+  conflict?: EventConflict;
 }
 
 interface IngestConfig {
   lateSyncWindowDays: number;
   futureToleranceMinutes: number;
-}
-
-interface SessionRow {
-  session_ref: string;
-  day_key: string;
-  student_name: string;
-  parent_phone: string;
-  signed_in_at: string | null;
-  signed_out_at: string | null;
-  signed_in_by: string | null;
-  signed_out_by: string | null;
-  server_version: number;
-  corrected: boolean;
-  conflict_type: string | null;
-  late_synced: boolean;
-  needs_review: boolean;
-  whatsapp_launched_at: string | null;
 }
 
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
@@ -92,8 +106,35 @@ function isDayKey(value: unknown): value is string {
   return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
 }
 
+function toProjection(row: IngestSessionSnapshot | null): ProjectionSnapshot | null {
+  if (!row) return null;
+  return {
+    sessionRef: row.session_ref,
+    studentName: row.student_name,
+    parentPhone: row.parent_phone,
+    dayKey: row.day_key,
+    signedInAt: row.signed_in_at,
+    signedOutAt: row.signed_out_at,
+    signedInBy: row.signed_in_by,
+    signedOutBy: row.signed_out_by,
+    serverVersion: row.server_version,
+    corrected: row.corrected,
+    conflictType: row.conflict_type,
+    lateSynced: row.late_synced,
+    needsReview: row.needs_review,
+    provisional: row.provisional,
+    whatsappLaunchedAt: row.whatsapp_launched_at,
+  };
+}
+
+function conflictMessage(reason: string | null): string {
+  if (reason === "competing_sign_in") {
+    return "Another sign-in already holds this session. This event was saved and sent to review.";
+  }
+  return "Another sign-out already holds this session. This event was saved and sent to review.";
+}
+
 async function ingestEvent(
-  supabase: Awaited<ReturnType<typeof getServerSupabaseClient>>,
   raw: Record<string, unknown>,
   staffName: string,
   config: IngestConfig,
@@ -179,114 +220,41 @@ async function ingestEvent(
     );
   }
 
-  // Idempotency lookup on eventId: return the original acknowledgement.
-  const { data: existing, error: idemError } = await supabase
-    .from("events")
-    .select("event_id, ingest_result, server_received_at")
-    .eq("event_id", eventId)
-    .maybeSingle();
-  if (idemError) throw idemError;
-  if (existing) {
-    return {
-      eventId,
-      result: "duplicate",
-      serverReceivedAt: existing.server_received_at as string,
-      message: `Duplicate event ${eventId}; original acknowledged ${existing.server_received_at}.`,
-    };
-  }
-
-  // Projection apply (sanctioned path — sets the mutation GUC, updates sessions).
-  try {
-    await applySessionProjection({
-      sessionRef: raw.sessionRef as string,
-      dayKey,
-      studentName: studentName ?? "",
-      parentPhone: parentPhone ?? "",
-      eventType: eventType as "sign_in" | "sign_out",
-      eventAt: deviceEventAt,
-      staffName,
-    });
-  } catch (err) {
-    return rejected(
-      eventId,
-      "processing_error",
-      `Projection apply failed: ${(err as Error).message}`,
-    );
-  }
-
-  // Insert the append-only event row.
+  // One atomic transaction: idempotency, conflict classification + audit,
+  // append-only event insert, projection update and review flags commit
+  // together. A conflict is acceptance-plus-flag, never a discard.
   const queuedDurationMs = Math.max(0, receiptMs - deviceMs);
-  const { error: insertError } = await supabase.from("events").insert({
-    event_id: eventId,
-    event_type: eventType,
-    session_ref: raw.sessionRef,
-    student_name: studentName,
-    parent_phone: parentPhone,
-    device_event_at: deviceEventAt,
-    server_received_at: serverReceivedAt.toISOString(),
-    queued_duration: `${queuedDurationMs} milliseconds`,
-    captured_offline: Boolean(raw.capturedOffline),
-    device_id: raw.deviceId,
-    device_seq: raw.deviceSeq,
-    staff_name: staffName,
-    day_key: dayKey,
-    conflict_marker: "none",
-    ingest_result: "accepted",
+  const ack = await ingestAttendanceEvent({
+    eventId,
+    eventType,
+    sessionRef: raw.sessionRef as string,
+    dayKey,
+    studentName,
+    parentPhone,
+    deviceEventAt,
+    serverReceivedAt: serverReceivedAt.toISOString(),
+    queuedDuration: `${queuedDurationMs} milliseconds`,
+    capturedOffline: Boolean(raw.capturedOffline),
+    deviceId: raw.deviceId as string,
+    deviceSeq: raw.deviceSeq as number,
+    staffName,
   });
 
-  if (insertError) {
-    const message = String(insertError.message ?? "");
-    // PD-D2 partial unique index: duplicate accepted sign_in/sign_out per session.
-    if (/duplicate key|unique|one_sign_(in|out)_per_session/i.test(message)) {
-      return {
-        eventId,
-        result: "conflict",
-        reason: "competing_event",
-        serverReceivedAt: serverReceivedAt.toISOString(),
-        message: "A competing event already occupies this session slot.",
-      };
-    }
-    throw insertError;
-  }
-
-  // Fetch the canonical session projection snapshot for the acknowledgement.
-  const { data: session } = await supabase
-    .from("sessions")
-    .select(
-      "session_ref, day_key, student_name, parent_phone, signed_in_at, signed_out_at, " +
-        "signed_in_by, signed_out_by, server_version, corrected, conflict_type, " +
-        "late_synced, needs_review, whatsapp_launched_at",
-    )
-    .eq("session_ref", raw.sessionRef)
-    .maybeSingle();
-
-  const sessionRow = session as unknown as SessionRow | null;
-
-  const projection =
-    sessionRow === null
-      ? null
-      : {
-          sessionRef: sessionRow.session_ref,
-          studentName: sessionRow.student_name,
-          parentPhone: sessionRow.parent_phone,
-          dayKey: sessionRow.day_key,
-          signedInAt: sessionRow.signed_in_at,
-          signedOutAt: sessionRow.signed_out_at,
-          signedInBy: sessionRow.signed_in_by,
-          signedOutBy: sessionRow.signed_out_by,
-          serverVersion: sessionRow.server_version,
-          corrected: sessionRow.corrected,
-          conflictType: sessionRow.conflict_type,
-          lateSynced: sessionRow.late_synced,
-          needsReview: sessionRow.needs_review,
-          whatsappLaunchedAt: sessionRow.whatsapp_launched_at,
-        };
+  const message =
+    ack.result === "duplicate"
+      ? `Duplicate event ${eventId}; original acknowledged ${ack.serverReceivedAt}.`
+      : ack.result === "conflict"
+        ? conflictMessage(ack.reason)
+        : undefined;
 
   return {
     eventId,
-    result: "accepted",
-    serverReceivedAt: serverReceivedAt.toISOString(),
-    projection,
+    result: ack.result,
+    reason: ack.reason ?? undefined,
+    message,
+    serverReceivedAt: ack.serverReceivedAt,
+    projection: toProjection(ack.projection),
+    conflict: ack.conflict ?? undefined,
   };
 }
 
@@ -357,7 +325,14 @@ export async function POST(req: Request): Promise<Response> {
   // 6. Per-event pipeline — partial failure is per-event, never all-or-nothing.
   const results: EventResult[] = [];
   for (const raw of body.events as Record<string, unknown>[]) {
-    results.push(await ingestEvent(supabase, raw, staffName, config, serverReceivedAt));
+    try {
+      results.push(await ingestEvent(raw, staffName, config, serverReceivedAt));
+    } catch {
+      // A database failure is not a validation rejection. The transaction
+      // rolled back, so the event is still only on the device: fail the batch
+      // so the client keeps every event queued and retries it.
+      return NextResponse.json({ error: "ingest_failed", serverTime }, { status: 500 });
+    }
   }
 
   // 7. Commit → then acknowledge (200 whenever authenticated and well-formed).

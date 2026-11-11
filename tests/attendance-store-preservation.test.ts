@@ -1,11 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
+  AcknowledgedProjection,
   AttendanceEvent,
   AttendanceRecord,
   clearAttendanceForDataset,
+  getAttendanceForDay,
   getPendingEvents,
   saveSignIn,
+  updatePendingEvent,
 } from "../src/lib/attendance-store";
 
 // ---------------------------------------------------------------------------
@@ -273,6 +276,110 @@ beforeEach(() => {
 
 afterEach(() => {
   resetStore();
+});
+
+describe("updatePendingEvent (per-event acknowledgement)", () => {
+  function projection(overrides: Partial<AcknowledgedProjection> = {}): AcknowledgedProjection {
+    return {
+      sessionRef: "sess-1",
+      studentName: "A Child",
+      parentPhone: "+2348012345678",
+      dayKey: "2026-10-31",
+      signedInAt: "2026-10-31T08:00:00+01:00",
+      signedOutAt: null,
+      signedInBy: "Staff",
+      signedOutBy: null,
+      serverVersion: 1,
+      corrected: false,
+      conflictType: null,
+      lateSynced: false,
+      needsReview: false,
+      provisional: false,
+      whatsappLaunchedAt: null,
+      ...overrides,
+    };
+  }
+
+  it("applies the acknowledged projection and removes the event in one transaction", async () => {
+    await saveSignIn(makeRecord("sess-1", [makeEvent({ eventId: "evt-1" })]));
+
+    await updatePendingEvent(
+      "evt-1",
+      true,
+      undefined,
+      projection({ signedOutAt: "2026-10-31T15:00:00+01:00", signedOutBy: "Staff", serverVersion: 2 }),
+    );
+
+    const [record] = await getAttendanceForDay("2026-10-31");
+    expect(record.pendingEvents).toHaveLength(0);
+    expect(record.signedOutAt).toBe("2026-10-31T15:00:00+01:00");
+    expect(record.serverVersion).toBe(2);
+    expect(record.syncError).toBeNull();
+  });
+
+  it("treats a conflict acknowledgement as acceptance and shows the review state", async () => {
+    const pending = makeEvent({
+      eventId: "evt-1",
+      eventType: "sign_out",
+      deviceEventAt: "2026-10-31T15:30:00+01:00",
+    });
+    await saveSignIn(makeRecord("sess-1", [pending]));
+
+    // The server retained this event but the first synchronised sign-out wins.
+    await updatePendingEvent(
+      "evt-1",
+      true,
+      "A competing sign-out already holds this session.",
+      projection({
+        signedOutAt: "2026-10-31T15:05:00+01:00",
+        serverVersion: 2,
+        needsReview: true,
+        conflictType: "time_conflict",
+      }),
+    );
+
+    const [record] = await getAttendanceForDay("2026-10-31");
+    expect(record.pendingEvents).toHaveLength(0);
+    expect(record.signedOutAt).toBe("2026-10-31T15:05:00+01:00");
+    expect(record.needsReview).toBe(true);
+    expect(record.conflictType).toBe("time_conflict");
+    expect(record.syncError).toBeNull();
+  });
+
+  it("keeps a rejected event in the outbox as failed", async () => {
+    await saveSignIn(makeRecord("sess-1", [makeEvent({ eventId: "evt-1" })]));
+
+    await updatePendingEvent("evt-1", false, "outside_late_window");
+
+    const [record] = await getAttendanceForDay("2026-10-31");
+    expect(record.pendingEvents).toHaveLength(1);
+    expect(record.pendingEvents[0].syncState).toBe("failed");
+    expect(record.pendingEvents[0].syncError).toBe("outside_late_window");
+  });
+
+  it("keeps identity null for a provisional session instead of inventing one", async () => {
+    const pending = makeEvent({ eventId: "evt-1", eventType: "sign_out" });
+    await saveSignIn(makeRecord("sess-1", [pending]));
+
+    await updatePendingEvent(
+      "evt-1",
+      true,
+      undefined,
+      projection({
+        studentName: null,
+        parentPhone: null,
+        provisional: true,
+        signedInAt: null,
+        signedOutAt: "2026-10-31T15:00:00+01:00",
+        needsReview: true,
+      }),
+    );
+
+    const [record] = await getAttendanceForDay("2026-10-31");
+    expect(record.studentName).toBeNull();
+    expect(record.parentPhone).toBeNull();
+    expect(record.provisional).toBe(true);
+  });
 });
 
 describe("clearAttendanceForDataset (D6 data preservation)", () => {

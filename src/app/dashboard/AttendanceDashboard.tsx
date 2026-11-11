@@ -4,6 +4,7 @@ import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "re
 import { useRouter } from "next/navigation";
 
 import {
+  AcknowledgedProjection,
   AttendanceEvent,
   AttendanceRecord,
   clearCachedStaffSession,
@@ -124,13 +125,13 @@ export default function AttendanceDashboard({ schoolName }: { schoolName: string
   );
   const visibleInSchool = useMemo(
     () => inSchool.filter((record) => (
-      `${record.studentName} ${record.parentPhone}`.toLowerCase().includes(search.trim().toLowerCase())
+      `${record.studentName ?? ""} ${record.parentPhone ?? ""}`.toLowerCase().includes(search.trim().toLowerCase())
     )),
     [inSchool, search],
   );
   const visibleSignedOut = useMemo(
     () => signedOut.filter((record) => (
-      `${record.studentName} ${record.parentPhone}`.toLowerCase().includes(search.trim().toLowerCase())
+      `${record.studentName ?? ""} ${record.parentPhone ?? ""}`.toLowerCase().includes(search.trim().toLowerCase())
     )),
     [signedOut, search],
   );
@@ -208,19 +209,28 @@ export default function AttendanceDashboard({ schoolName }: { schoolName: string
           throw new Error("Could not sync attendance. Your saved records are still on this phone.");
         }
         const body = await response.json() as {
-          results?: Array<{ eventId: string; result: string; message?: string }>;
+          results?: Array<{
+            eventId: string;
+            result: string;
+            message?: string;
+            projection?: AcknowledgedProjection | null;
+          }>;
         };
         const result = body.results?.find((item) => item.eventId === event.eventId);
         if (!result) {
           throw new Error("The server did not confirm an attendance record. It remains saved on this phone.");
         }
-        const accepted = result.result === "accepted" || result.result === "duplicate";
+        // `conflict` is an acknowledgement: the server retained and classified
+        // the event, so it must leave the outbox (it is not a rejection).
+        const acknowledged =
+          result.result === "accepted" ||
+          result.result === "duplicate" ||
+          result.result === "conflict";
         await updatePendingEvent(
           event.eventId,
-          accepted,
-          result.message ?? (result.result === "conflict"
-            ? "This record conflicts with another device. Ask the lead teacher to check it."
-            : "The server did not accept this record."),
+          acknowledged,
+          result.message ?? "The server did not accept this record.",
+          acknowledged ? result.projection ?? null : undefined,
         );
       }
       if (datasetIdRef.current && !datasetResetRequiredRef.current) {
@@ -530,6 +540,8 @@ export default function AttendanceDashboard({ schoolName }: { schoolName: string
       !datasetVerified ||
       !record.signedInAt ||
       !online ||
+      !record.studentName ||
+      !record.parentPhone ||
       (type === "sign_out" && !record.signedOutAt)
     ) return;
     setOpeningMessage((current) => new Set(current).add(record.sessionRef));
@@ -596,7 +608,7 @@ export default function AttendanceDashboard({ schoolName }: { schoolName: string
   }
 
   async function handleCopy(record: AttendanceRecord) {
-    if (!record.signedInAt || !record.signedOutAt) return;
+    if (!record.signedInAt || !record.signedOutAt || !record.studentName) return;
     const message = buildSignOutMessage(
       record.studentName,
       formatTime(record.signedInAt),
@@ -758,10 +770,11 @@ export default function AttendanceDashboard({ schoolName }: { schoolName: string
                 return (
                   <li className="student-card" key={record.sessionRef}>
                     <div className="student-details">
-                      <strong className="student-name">{record.studentName}</strong>
+                      <strong className="student-name">{record.studentName ?? "Identity not yet confirmed"}</strong>
                       <div className="student-line-2">
-                        <span className="student-phone">{record.parentPhone}</span>
+                        <span className="student-phone">{record.parentPhone ?? "—"}</span>
                         <span className={sync.className}>{sync.label}</span>
+                        {record.needsReview && <span className="sync-label sync-label--pending">Needs review</span>}
                       </div>
                       <span className="student-time">{formatTime(record.signedInAt)}</span>
                       {record.syncError && <span className="sync-error">{record.syncError}</span>}
@@ -812,10 +825,11 @@ export default function AttendanceDashboard({ schoolName }: { schoolName: string
                 return (
                   <li className="student-card student-card--completed" key={record.sessionRef}>
                     <div className="student-details">
-                      <strong className="student-name">{record.studentName}</strong>
+                      <strong className="student-name">{record.studentName ?? "Identity not yet confirmed"}</strong>
                       <div className="student-line-2">
-                        <span className="student-phone">{record.parentPhone}</span>
+                        <span className="student-phone">{record.parentPhone ?? "—"}</span>
                         <span className={sync.className}>{sync.label}</span>
+                        {record.needsReview && <span className="sync-label sync-label--pending">Needs review</span>}
                       </div>
                       <span className="student-time student-time--range">
                         {formatTime(record.signedInAt)} to {formatTime(record.signedOutAt)}

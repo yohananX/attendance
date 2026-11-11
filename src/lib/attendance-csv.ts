@@ -1,6 +1,7 @@
 export interface AttendanceCsvRow {
-  studentName: string;
-  parentPhone: string;
+  // Null for a provisional session (sign-out synced before its sign-in, PD-D3).
+  studentName: string | null;
+  parentPhone: string | null;
   signedInAt: string | null;
   signedOutAt: string | null;
 }
@@ -15,8 +16,8 @@ export function buildAttendanceCsv(
 ): string {
   const header = ["Student name", "Parent phone", "Sign in", "Sign out"];
   const body = rows.map((row) => [
-    row.studentName,
-    row.parentPhone,
+    row.studentName ?? "",
+    row.parentPhone ?? "",
     formatTime(row.signedInAt),
     formatTime(row.signedOutAt),
   ]);

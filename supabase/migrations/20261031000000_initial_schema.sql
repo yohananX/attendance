@@ -202,9 +202,9 @@ CREATE INDEX IF NOT EXISTS idx_app_settings_key ON app_settings(setting_key);
 -- ============================================================
 -- Health endpoint privilege probe (H2).
 -- Returns the current database role so /api/health can prove it is operating
--- through the privileged service role (current_user <> 'anon') rather than
--- merely through an anon-key connectivity probe that RLS with no policies
--- would let succeed with an empty result set.
+-- with exactly the privileged service role (current_user = 'service_role').
+-- Connectivity alone cannot establish privileged capability: RLS with no
+-- policies lets anon/authenticated access succeed with an empty result set.
 -- ============================================================
 CREATE OR REPLACE FUNCTION health_privilege_check()
 RETURNS text

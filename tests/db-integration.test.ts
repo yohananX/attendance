@@ -169,10 +169,10 @@ describe.skipIf(!DATABASE_URL)(
         "SELECT health_privilege_check() AS health_privilege_check",
       );
       expect(typeof rows[0].health_privilege_check).toBe("string");
-      // Honest probe: returns the current role. /api/health treats any role
-      // other than anon as privileged; a plain PostgreSQL test connection runs
-      // as a superuser, so the reported role is that superuser (not "anon" and
-      // not necessarily "service_role").
+      // Honest probe: returns the current role. /api/health requires the
+      // exact "service_role" for dbReady; a plain PostgreSQL test connection
+      // runs as a superuser (not "anon"/"authenticated" and not "service_role"),
+      // so the reported role is that superuser.
       expect(rows[0].health_privilege_check).toBe(role[0].current_user);
     });
 
@@ -221,17 +221,5 @@ describe.skipIf(!DATABASE_URL)(
       await insertSignOut("losing");
     });
 
-    it("health_privilege_check reports the current database role for the privileged-capability probe", async () => {
-      const { rows: role } = await client.query<{ current_user: string }>("SELECT current_user");
-      const { rows } = await client.query<{ health_privilege_check: string }>(
-        "SELECT health_privilege_check() AS health_privilege_check",
-      );
-      expect(typeof rows[0].health_privilege_check).toBe("string");
-      // Honest probe: returns the current role. /api/health treats any role
-      // other than anon as privileged; a plain PostgreSQL test connection runs
-      // as a superuser, so the reported role is that superuser (not "anon" and
-      // not necessarily "service_role").
-      expect(rows[0].health_privilege_check).toBe(role[0].current_user);
-    });
   },
 );

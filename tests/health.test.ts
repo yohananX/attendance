@@ -83,6 +83,15 @@ describe("GET /api/health", () => {
     expect(body.dbReady).toBe(false);
   });
 
+  it("dbReady is false when the privilege probe returns the authenticated role (H2)", async () => {
+    const fake = privilegedClient();
+    fake.rpc.mockResolvedValue({ data: "authenticated", error: null });
+    clientMock.mockReturnValue(fake);
+    const res = await GET(requestWith("test-secret"));
+    const body = await res.json();
+    expect(body.dbReady).toBe(false);
+  });
+
   it("dbReady is false when the privilege probe errors (H2)", async () => {
     const fake = privilegedClient();
     fake.rpc.mockResolvedValue({ data: null, error: new Error("rpc failed") });

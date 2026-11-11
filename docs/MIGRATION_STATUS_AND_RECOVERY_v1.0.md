@@ -1,8 +1,9 @@
 # Migration chain, reset and future changes (Phase 0 D1/D8)
 
 **Status:** the migration chain is corrected for clean installation from an empty
-database. The existing Supabase database is **intentionally reset** and rebuilt
-from this chain (owner-executed; see `docs/SUPABASE_SETUP_v1.0.md`).
+database. A database reset/rebuild from this chain is **intended and approved** but
+**has not yet been executed or verified** against the hosted/production Supabase
+environment. It remains an owner-executed action only (see `docs/SUPABASE_SETUP_v1.0.md`).
 
 ## Migration chain (ordered)
 
@@ -27,16 +28,20 @@ installations. Verified corrections include:
 - `sessions_apply_correction` records a real correction event id in
   `corrections.correction_event_id` (FK to `events`) in both applied and
   version-conflict branches;
-- `health_privilege_check()` returns the current database role as `text`;
+- `health_privilege_check()` returns the current database role as `text` (the
+  `/api/health` privileged-capability probe requires it to equal exactly
+  `service_role`);
 - `corrections.correction_event_id` is unique, consistent with the contract.
 
 The migration must be reviewed as a whole against the database contract and
 approved Phase 0 decisions when changed; do not patch individual lines in
 isolation.
 
-## Intentional database reset
+## Database reset (intended/approved, not yet executed)
 
-Reset/reprovision is destructive and **owner-executed only**. Procedure:
+Reset/reprovision is **intended and approved** but **has not yet been executed or
+verified**. It is destructive and **owner-executed only** (never automatic).
+**Back up/export any data that must be retained before proceeding.** Procedure:
 
 1. Export/backup any data that must be retained; confirm it.
 2. Clear/provision a genuinely empty database (no app tables, no prior
@@ -45,7 +50,8 @@ Reset/reprovision is destructive and **owner-executed only**. Procedure:
    `supabase db push --db-url <url>`.
 4. Confirm history rows for `20261031000000` and `20261109000000`.
 5. Verify protections, correction RPC, ingest/conflict reconciliation, and
-   `/api/health` (`dbReady: true` with a valid operator secret).
+   `/api/health` (`dbReady: true` with a valid operator secret, using the
+   `service_role` server connection).
 
 Do not hand-create schema, disable PostgreSQL validation, or fabricate/bypass
 migration history.

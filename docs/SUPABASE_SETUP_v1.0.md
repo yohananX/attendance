@@ -1,7 +1,8 @@
 # Supabase setup — migrations, reset and clean install
 
 This document describes the corrected Grace House database migration chain, the
-intentional database reset, and the normal installation procedure.
+intended (approved but not yet executed/verified) database reset, and the normal
+installation procedure.
 
 > **Credentials:** never commit `.env.local` or secrets. Only add secrets to
 > Vercel Environment Variables for deployed environments. The browser never
@@ -31,16 +32,20 @@ that file, including:
   real `event_id` in `corrections.correction_event_id` (a foreign key to
   `events`) in both the applied and version-conflict branches, so correction
   audit rows can be written;
-- `health_privilege_check()` returns the current database role as `text` for the
-  `/api/health` privileged-capability probe;
+- `health_privilege_check()` returns the current database role as `text`; the
+  `/api/health` privileged-capability probe requires it to equal exactly
+  `service_role` (`dbReady: true` only for that role, with a healthy probe);
 - `corrections.correction_event_id` is unique, consistent with the database
   contract.
 
-## 2) Intentional database reset (owner-executed)
+## 2) Database reset (intended/approved, not yet executed — owner-executed only)
 
-**Project decision:** the existing Supabase database is cleared and rebuilt from
-the corrected migration chain. This is a destructive operation on attendance
-data and must be performed only by the owner, with explicit confirmation.
+**Project decision:** the existing Supabase database is to be cleared and rebuilt
+from the corrected migration chain. This reset is **intended and approved** but
+**has not yet been executed or verified**. It is a destructive operation on
+attendance data and must be performed only by the owner, with explicit
+confirmation. **Back up/export any data that must be retained before
+proceeding.**
 
 **Do not run these steps automatically.** Prepare and verify the migrations
 first; the owner executes the reset.

@@ -36,11 +36,13 @@ export async function GET(req: Request) {
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
-    // Privilege probe: proves the call runs as the service role, not the anon
-    // role. RLS with no policies lets an anon key read zero rows without
-    // error, so connectivity alone cannot establish privileged capability.
+    // Privilege probe: proves the call runs as the service role (the only role
+    // the server is permitted to use). RLS with no policies lets anon or
+    // authenticated keys read zero rows without error, so connectivity alone
+    // cannot establish privileged capability; dbReady requires the exact
+    // service_role.
     const { data: role, error: roleError } = await supabase.rpc("health_privilege_check");
-    const isPrivileged = !roleError && typeof role === "string" && role !== "anon";
+    const isPrivileged = !roleError && role === "service_role";
     const probe = await supabase
       .from("events")
       .select("event_id", { head: true, count: "exact" })

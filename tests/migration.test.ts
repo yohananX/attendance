@@ -10,6 +10,10 @@ const ATOMIC_MIGRATION = fs.readFileSync(
   path.resolve("supabase/migrations/20261109000000_atomic_event_ingest.sql"),
   "utf8",
 );
+const IDEMPOTENCY_MIGRATION = fs.readFileSync(
+  path.resolve("supabase/migrations/20261112000000_event_id_idempotency.sql"),
+  "utf8",
+);
 
 describe("migration SQL content", () => {
   it("creates all five contract tables plus the PD-D1 settings table", () => {
@@ -102,5 +106,38 @@ describe("atomic ingest migration", () => {
     expect(ATOMIC_MIGRATION).toContain(
       "CHECK (provisional OR (student_name IS NOT NULL AND parent_phone IS NOT NULL))",
     );
+  });
+});
+
+describe("event id idempotency migration", () => {
+  it("replaces the ingest function and binds a repeated event id to the same payload", () => {
+    expect(IDEMPOTENCY_MIGRATION).toContain("CREATE OR REPLACE FUNCTION ingest_attendance_event(");
+    expect(IDEMPOTENCY_MIGRATION).toContain("event_id_reuse_mismatch");
+    for (const payloadField of [
+      "event_type",
+      "session_ref",
+      "day_key",
+      "student_name",
+      "parent_phone",
+      "device_event_at",
+      "captured_offline",
+      "device_id",
+      "device_seq",
+      "staff_name",
+    ]) {
+      expect(IDEMPOTENCY_MIGRATION).toMatch(
+        new RegExp(
+          `v_existing\\.${payloadField}\\s+IS DISTINCT FROM\\s+p_${payloadField}`,
+        ),
+      );
+    }
+  });
+
+  it("is forward-only: it adds no destructive DDL and keeps the atomic transaction", () => {
+    expect(IDEMPOTENCY_MIGRATION).not.toMatch(/DROP\s+TABLE/i);
+    expect(IDEMPOTENCY_MIGRATION).not.toMatch(/DELETE\s+FROM\s+events/i);
+    expect(IDEMPOTENCY_MIGRATION).not.toMatch(/TRUNCATE/i);
+    expect(IDEMPOTENCY_MIGRATION).toContain("pg_advisory_xact_lock");
+    expect(IDEMPOTENCY_MIGRATION).toContain("INSERT INTO conflicts");
   });
 });

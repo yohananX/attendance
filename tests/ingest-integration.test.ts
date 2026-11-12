@@ -19,6 +19,7 @@ const MIGRATION_LOCK = 8123456;
 const MIGRATIONS = [
   "supabase/migrations/20261031000000_initial_schema.sql",
   "supabase/migrations/20261109000000_atomic_event_ingest.sql",
+  "supabase/migrations/20261112000000_event_id_idempotency.sql",
 ].map((file) => fs.readFileSync(path.resolve(file), "utf8"));
 
 const INGEST_SQL = `SELECT ingest_attendance_event(

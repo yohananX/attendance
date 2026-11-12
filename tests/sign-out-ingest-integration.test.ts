@@ -17,6 +17,7 @@ const MIGRATION_LOCK = 8123456;
 const MIGRATIONS = [
   "supabase/migrations/20261031000000_initial_schema.sql",
   "supabase/migrations/20261109000000_atomic_event_ingest.sql",
+  "supabase/migrations/20261112000000_event_id_idempotency.sql",
 ].map((file) => fs.readFileSync(path.resolve(file), "utf8"));
 
 const INGEST_SQL = `SELECT ingest_attendance_event(
@@ -120,6 +121,12 @@ async function ingestAndCommit(db: Client, input: IngestInput): Promise<Ack> {
   }
 }
 
+async function connect(): Promise<Client> {
+  const db = new Client({ connectionString: DATABASE_URL });
+  await db.connect();
+  return db;
+}
+
 function iso(value: string): string {
   return new Date(value).toISOString();
 }
@@ -210,6 +217,152 @@ describe.skipIf(!DATABASE_URL)("legacy sign-out atomic ingest (live PostgreSQL)"
       [sessionRef],
     );
     expect(accepted[0].n).toBe(1);
+  });
+
+  it("rejects reuse of an event id for a different event type", async () => {
+    const sessionRef = randomUUID();
+    const first = signIn(sessionRef);
+    await ingestAndCommit(client, first);
+
+    const conflicting = legacySignOut(sessionRef, { eventId: first.eventId });
+    await expect(ingestAndCommit(client, conflicting)).rejects.toThrow(/event_id_reuse_mismatch/);
+
+    const { rows } = await client.query(
+      "SELECT event_type, session_ref FROM events WHERE event_id = $1",
+      [first.eventId],
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ event_type: "sign_in", session_ref: sessionRef });
+  });
+
+  it("rejects reuse of an event id for a different session reference", async () => {
+    const first = signIn(randomUUID());
+    await ingestAndCommit(client, first);
+
+    const otherSession = signIn(randomUUID());
+    await expect(
+      ingestAndCommit(client, { ...otherSession, eventId: first.eventId }),
+    ).rejects.toThrow(/event_id_reuse_mismatch/);
+
+    const { rows } = await client.query(
+      "SELECT count(*)::int AS n FROM events WHERE event_id = $1",
+      [first.eventId],
+    );
+    expect(rows[0].n).toBe(1);
+  });
+
+  it("rejects reuse of an event id with a materially different timestamp", async () => {
+    const sessionRef = randomUUID();
+    const first = signIn(sessionRef);
+    await ingestAndCommit(client, first);
+
+    const conflicting = {
+      ...first,
+      deviceEventAt: new Date(new Date(first.deviceEventAt).getTime() - 60_000).toISOString(),
+    };
+    await expect(ingestAndCommit(client, conflicting)).rejects.toThrow(/event_id_reuse_mismatch/);
+  });
+
+  it("rejects reuse of an event id with a different immutable payload and preserves the original row", async () => {
+    const sessionRef = randomUUID();
+    const first = signIn(sessionRef);
+    await ingestAndCommit(client, first);
+
+    const before = (
+      await client.query(
+        "SELECT event_id, event_type, session_ref, student_name, parent_phone, device_event_at, " +
+          "captured_offline, device_id, device_seq, staff_name, day_key, conflict_marker, ingest_result " +
+          "FROM events WHERE event_id = $1",
+        [first.eventId],
+      )
+    ).rows[0];
+
+    await expect(
+      ingestAndCommit(client, { ...first, staffName: "Alice" }),
+    ).rejects.toThrow(/event_id_reuse_mismatch/);
+
+    const after = (
+      await client.query(
+        "SELECT event_id, event_type, session_ref, student_name, parent_phone, device_event_at, " +
+          "captured_offline, device_id, device_seq, staff_name, day_key, conflict_marker, ingest_result " +
+          "FROM events WHERE event_id = $1",
+        [first.eventId],
+      )
+    ).rows[0];
+    expect(after).toEqual(before);
+
+    const { rows: count } = await client.query(
+      "SELECT count(*)::int AS n FROM events WHERE session_ref = $1",
+      [sessionRef],
+    );
+    expect(count[0].n).toBe(1);
+    const { rows: conflicts } = await client.query(
+      "SELECT count(*)::int AS n FROM conflicts WHERE session_ref = $1",
+      [sessionRef],
+    );
+    expect(conflicts[0].n).toBe(0);
+  });
+
+  it("keeps concurrent submissions with the same event id to one event row", async () => {
+    const first = await connect();
+    const second = await connect();
+    try {
+      const input = legacySignOut(randomUUID());
+      const results = await Promise.all([
+        ingestAndCommit(first, input),
+        ingestAndCommit(second, input),
+      ]);
+
+      expect(results.map((ack) => ack.result).sort()).toEqual(["accepted", "duplicate"]);
+      const { rows } = await client.query(
+        "SELECT count(*)::int AS n FROM events WHERE event_id = $1",
+        [input.eventId],
+      );
+      expect(rows[0].n).toBe(1);
+    } finally {
+      await first.end().catch(() => undefined);
+      await second.end().catch(() => undefined);
+    }
+  });
+
+  it("does not let concurrent reuse with a different payload become a second accepted event", async () => {
+    const sessionRef = randomUUID();
+    await ingestAndCommit(client, signIn(sessionRef));
+
+    const first = await connect();
+    const second = await connect();
+    try {
+      const a = legacySignOut(sessionRef);
+      const b = {
+        ...a,
+        deviceEventAt: new Date(Date.now() + 60_000).toISOString(),
+        deviceSeq: 2,
+      };
+      const outcomes = await Promise.allSettled([
+        ingestAndCommit(first, a),
+        ingestAndCommit(second, b),
+      ]);
+
+      const fulfilled = outcomes.filter(
+        (outcome): outcome is PromiseFulfilledResult<Ack> => outcome.status === "fulfilled",
+      );
+      const rejected = outcomes.filter(
+        (outcome): outcome is PromiseRejectedResult => outcome.status === "rejected",
+      );
+      expect(fulfilled).toHaveLength(1);
+      expect(fulfilled[0].value.result).toBe("accepted");
+      expect(rejected).toHaveLength(1);
+      expect(String(rejected[0].reason)).toMatch(/event_id_reuse_mismatch/);
+
+      const { rows } = await client.query(
+        "SELECT count(*)::int AS n FROM events WHERE event_id = $1",
+        [a.eventId],
+      );
+      expect(rows[0].n).toBe(1);
+    } finally {
+      await first.end().catch(() => undefined);
+      await second.end().catch(() => undefined);
+    }
   });
 
   it("retains a competing sign-out as a conflict without bypassing the uniqueness invariant", async () => {

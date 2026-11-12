@@ -36,7 +36,12 @@ import {
   ingestAttendanceEvent,
   type IngestSessionSnapshot,
 } from "@/lib/supabase/rpc";
-import { getStaffName, lagosDateKey, lagosDayDifference } from "@/lib/session";
+import { getStaffName } from "@/lib/session";
+import {
+  acceptanceConfigFromSettings,
+  checkEventAcceptance,
+  type EventAcceptanceConfig,
+} from "@/lib/event-acceptance";
 import { normalizePhone } from "@/lib/phone";
 import { getAttendanceDatasetId } from "@/lib/attendance-dataset";
 
@@ -80,11 +85,6 @@ interface EventResult {
   serverReceivedAt?: string;
   projection?: ProjectionSnapshot | null;
   conflict?: EventConflict;
-}
-
-interface IngestConfig {
-  lateSyncWindowDays: number;
-  futureToleranceMinutes: number;
 }
 
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
@@ -137,11 +137,10 @@ function conflictMessage(reason: string | null): string {
 async function ingestEvent(
   raw: Record<string, unknown>,
   staffName: string,
-  config: IngestConfig,
+  config: EventAcceptanceConfig,
   serverReceivedAt: Date,
 ): Promise<EventResult> {
   const receiptMs = serverReceivedAt.getTime();
-  const serverLagosDay = lagosDateKey(serverReceivedAt.toISOString()) ?? new Date().toISOString().slice(0, 10);
 
   const eventId = raw.eventId;
   if (typeof eventId !== "string" || !isUuid(eventId)) {
@@ -191,33 +190,15 @@ async function ingestEvent(
   const dayKey = raw.dayKey as string;
   const deviceMs = new Date(deviceEventAt).getTime();
 
-  // Acceptance window: server recomputes and verifies the Lagos day key.
-  const eventLagosDay = lagosDateKey(deviceEventAt);
-  if (!eventLagosDay || eventLagosDay !== dayKey) {
-    return rejected(
-      eventId,
-      "day_key_mismatch",
-      `Submitted dayKey ${dayKey} does not match server-recomputed Lagos date ${eventLagosDay ?? "<unparseable>"}`,
-    );
-  }
-
-  // deviceEventAt not more than the configured future tolerance ahead of receipt.
-  if (deviceMs > receiptMs + config.futureToleranceMinutes * 60 * 1000) {
-    return rejected(
-      eventId,
-      "future_tolerance_exceeded",
-      `deviceEventAt is more than ${config.futureToleranceMinutes} minutes ahead of server receipt`,
-    );
-  }
-
-  // dayKey within the configured late-sync window (Lagos days old).
-  const dayAge = lagosDayDifference(dayKey, serverLagosDay);
-  if (dayAge > config.lateSyncWindowDays) {
-    return rejected(
-      eventId,
-      "outside_late_window",
-      `Event is ${dayAge} days old; permitted window is ${config.lateSyncWindowDays} days`,
-    );
+  // Shared PD-D1 acceptance window (same policy as the legacy sign-out route).
+  const acceptanceRejection = checkEventAcceptance({
+    deviceEventAt,
+    dayKey,
+    serverReceivedAt,
+    config,
+  });
+  if (acceptanceRejection) {
+    return rejected(eventId, acceptanceRejection.reason, acceptanceRejection.message);
   }
 
   // One atomic transaction: idempotency, conflict classification + audit,
@@ -317,10 +298,7 @@ export async function POST(req: Request): Promise<Response> {
   // 5. Load PD-D1 configuration from app_settings (never hard-coded).
   const { data: settings } = await supabase.from("app_settings").select("setting_key, setting_value");
   const byKey = Object.fromEntries((settings ?? []).map((s) => [s.setting_key, s.setting_value]));
-  const config: IngestConfig = {
-    lateSyncWindowDays: Number(byKey["late_sync_window_days"] ?? 7),
-    futureToleranceMinutes: Number(byKey["future_tolerance_minutes"] ?? 5),
-  };
+  const config: EventAcceptanceConfig = acceptanceConfigFromSettings(settings);
 
   // 6. Per-event pipeline — partial failure is per-event, never all-or-nothing.
   const results: EventResult[] = [];

@@ -10,28 +10,40 @@
  *
  * The legacy contract has no client event identity or device timestamp: the
  * event id and capture time default to the server clock at request time. A
- * caller that already has an event id / device timestamp (e.g. the sync queue)
- * may send `eventId`, `deviceEventAt`, `deviceId`, `deviceSeq` and
- * `capturedOffline`; when `eventId` is omitted the route derives a stable id
- * from `sessionRef`, so a retry of the same logical sign-out reuses the
- * ingestion idempotency key instead of creating a second event.
+ * caller that captured the tap on a device may send `eventId`,
+ * `deviceEventAt`, `deviceId`, `deviceSeq` and `capturedOffline`. Because an
+ * event id is the ingestion idempotency key and its timestamp is immutable,
+ * `eventId` must be sent together with `deviceEventAt`; without a timestamp the
+ * route generates a new id and the server clock is the capture time.
+ *
+ * A supplied `deviceEventAt` is held to the same acceptance window as
+ * `/api/events` (shared helper, PD-D1 configuration from `app_settings`): its
+ * Lagos day must match the session's day key, it may not exceed the configured
+ * future tolerance, and it may not fall outside the late-sync window. Rejected
+ * timestamps return 422 and never reach the ingest RPC. No timestamp is ever
+ * clamped or rewritten to force acceptance.
  *
  * Returns 401 without a valid session, 400 for a malformed/invalid body, 404
- * for an unknown session, 503 when Supabase is not configured, 500 when the
- * ingest transaction fails, and 200 otherwise. Signing out an
- * already-signed-out child is idempotent: it returns the canonical stored
- * sign-out without ingesting a second event.
+ * for an unknown session, 409 when a reused event id identifies a different
+ * event, 422 for a timestamp outside the acceptance window, 503 when Supabase
+ * is not configured, 500 when the ingest transaction fails, and 200 otherwise.
+ * Signing out an already-signed-out child is idempotent: it returns the
+ * canonical stored sign-out without ingesting a second event.
  */
 
 export const dynamic = "force-dynamic";
 
-import { createHash, randomUUID } from "crypto";
+import { randomUUID } from "crypto";
 
 import { NextResponse } from "next/server";
 
 import { getServerSupabaseClient } from "@/lib/supabase/server";
 import { ingestAttendanceEvent } from "@/lib/supabase/rpc";
 import { SESSION_COOKIE_NAME, getCookie, validateSession } from "@/lib/session";
+import {
+  acceptanceConfigFromSettings,
+  checkEventAcceptance,
+} from "@/lib/event-acceptance";
 
 interface SessionRow {
   session_ref: string;
@@ -48,27 +60,6 @@ function isUuid(value: unknown): value is string {
 
 function isIsoTimestamp(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && !Number.isNaN(new Date(value).getTime());
-}
-
-/**
- * Stable event id for a legacy sign-out that did not supply one. Deriving it
- * from `sessionRef` means a retried request reuses the existing event identity
- * (RFC 4122 version 5-style UUID), so the ingest transaction sees a duplicate
- * rather than a competing second sign-out. It is not a second idempotency
- * system: the event id remains the one key the ingest RPC checks.
- */
-function legacySignOutEventId(sessionRef: string): string {
-  const digest = createHash("sha1")
-    .update("grace-house:legacy-sign-out:")
-    .update(sessionRef.toLowerCase())
-    .digest();
-  digest[6] = (digest[6] & 0x0f) | 0x50;
-  digest[8] = (digest[8] & 0x3f) | 0x80;
-  const hex = digest.subarray(0, 16).toString("hex");
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(
-    16,
-    20,
-  )}-${hex.slice(20)}`;
 }
 
 interface SignOutBody {
@@ -131,6 +122,12 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "schema_invalid", serverTime }, { status: 400 });
   }
 
+  // An event id without its immutable device timestamp could not be replayed
+  // idempotently (the server clock would differ on retry), so require the pair.
+  if (body.eventId !== undefined && body.deviceEventAt === undefined) {
+    return NextResponse.json({ error: "schema_invalid", serverTime }, { status: 400 });
+  }
+
   let supabase;
   try {
     supabase = getServerSupabaseClient();
@@ -168,13 +165,34 @@ export async function POST(req: Request) {
     });
   }
 
-  const eventId: string =
-    typeof body.eventId === "string" ? body.eventId : legacySignOutEventId(sessionRef);
-  // The legacy contract records the server clock; a caller that captured the
-  // tap on the device can supply the original timestamp instead.
-  const deviceEventAt: string = isIsoTimestamp(body.deviceEventAt)
-    ? new Date(body.deviceEventAt).toISOString()
+  const hasDeviceTimestamp = isIsoTimestamp(body.deviceEventAt);
+  const deviceEventAt = hasDeviceTimestamp
+    ? new Date(body.deviceEventAt as string).toISOString()
     : serverTime;
+
+  // A caller-supplied capture time must satisfy the same PD-D1 acceptance
+  // window as /api/events, against this session's day key. The legacy
+  // server-clock default is not re-dated or checked against the session day.
+  if (hasDeviceTimestamp) {
+    const { data: settings } = await supabase
+      .from("app_settings")
+      .select("setting_key, setting_value");
+    const rejection = checkEventAcceptance({
+      deviceEventAt,
+      dayKey: sessionRow.day_key,
+      serverReceivedAt: new Date(serverTime),
+      config: acceptanceConfigFromSettings(settings),
+    });
+    if (rejection) {
+      return NextResponse.json(
+        { error: rejection.reason, message: rejection.message, serverTime },
+        { status: 422 },
+      );
+    }
+  }
+
+  const eventId: string =
+    typeof body.eventId === "string" ? body.eventId : randomUUID();
   const deviceId: string = typeof body.deviceId === "string" ? body.deviceId : eventId;
   const deviceSeq: number = typeof body.deviceSeq === "number" ? body.deviceSeq : 1;
 
@@ -201,7 +219,21 @@ export async function POST(req: Request) {
       deviceSeq,
       staffName: session.staffName,
     });
-  } catch {
+  } catch (error) {
+    // A reused event id that belongs to another logical event is a client
+    // conflict, not a database outage. The transaction raised before writing,
+    // so the original event and projection are untouched.
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes("event_id_reuse_mismatch")) {
+      return NextResponse.json(
+        {
+          error: "event_id_conflict",
+          message: "This event id already belongs to a different attendance event.",
+          serverTime,
+        },
+        { status: 409 },
+      );
+    }
     // The ingest transaction rolled back, so nothing was persisted. Never
     // report success when the event/projection did not commit.
     return NextResponse.json({ error: "sign_out_failed", serverTime }, { status: 500 });
